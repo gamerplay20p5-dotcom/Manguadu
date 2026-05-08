@@ -23,9 +23,12 @@ PM2_APP_NAME=manguadu
 BOT_UPDATE_BRANCH=main
 BOT_AUTO_UPDATE_ENABLED=1
 BOT_AUTO_UPDATE_INTERVAL_MS=120000
+AUTOMATION_TIMEZONE=America/Sao_Paulo
+AUTOMATION_GRACE_MINUTES=5
 ```
 
 `BOT_AUTO_UPDATE_INTERVAL_MS` precisa ser pelo menos `60000`.
+`AUTOMATION_GRACE_MINUTES` define por quantos minutos depois do horario marcado o bot ainda pode disparar uma automacao.
 
 ## O que o update executa
 

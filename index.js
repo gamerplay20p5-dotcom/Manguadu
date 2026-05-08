@@ -45,6 +45,7 @@ const {
   createAutomation,
   formatAutomationLine,
   formatAutomationsList,
+  getAutomationRuntimeStatus,
   getAutomationTimezone,
   removeAutomation,
   runAutomationNow,
@@ -854,7 +855,14 @@ async function handleAutomationCommand(interaction) {
   }
 
   if (subcommand === 'listar') {
-    await interaction.editReply(`Timezone: ${getAutomationTimezone()}\n${truncate(formatAutomationsList(), 1850)}`);
+    const runtime = getAutomationRuntimeStatus();
+    const header = [
+      `Timezone: ${getAutomationTimezone()}`,
+      `Agora na VM: ${runtime.dateKey} ${runtime.timeKey} (${runtime.weekdayLabel})`,
+      `Janela de execucao: ${runtime.graceMinutes} minuto(s)`,
+      `Arquivo: ${runtime.storeFile}`,
+    ].join('\n');
+    await interaction.editReply(`${header}\n${truncate(formatAutomationsList(), 1700)}`);
     return;
   }
 
