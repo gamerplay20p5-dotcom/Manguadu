@@ -60,6 +60,7 @@ const {
   scheduleBotRestart,
   startBotAutoUpdateLoop,
 } = require('./lib/bot-updater');
+const { startAntiCheatAlertLoop } = require('./lib/anticheat-alerts');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -626,7 +627,7 @@ const slashCommandBuilders = [
             ),
         )
         .addStringOption((option) => option.setName('horario').setDescription('Horario no formato HH:MM').setRequired(true))
-        .addStringOption((option) => option.setName('dias').setDescription('todos, uteis, fds ou ex: seg,qua,sex').setRequired(false))
+        .addStringOption((option) => option.setName('dias').setDescription('todos, uteis, fds ou numeros: 1=domingo ... 7=sabado').setRequired(false))
         .addIntegerOption((option) =>
           option.setName('manter_backups').setDescription('Backups automaticos para manter').setRequired(false).setMinValue(1).setMaxValue(50),
         )
@@ -1032,6 +1033,7 @@ client.once('clientReady', async () => {
     startDataWatchers();
     startAutomationLoop({ notify: sendAutomationMessage });
     startBotAutoUpdateLoop({ notify: sendAutomationMessage });
+    startAntiCheatAlertLoop({ fetchTextChannel });
     await refreshStatsPanel();
     await refreshRankingPanel();
   } catch (error) {
