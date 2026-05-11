@@ -412,9 +412,15 @@ async function startLogMirrors() {
     return;
   }
 
-  const webhookChat = cleanText(process.env.WEBHOOK_CHAT)
-    ? new WebhookClient({ url: cleanText(process.env.WEBHOOK_CHAT) })
-    : null;
+  let webhookChat = null;
+  const webhookChatUrl = cleanText(process.env.WEBHOOK_CHAT);
+  if (webhookChatUrl) {
+    try {
+      webhookChat = new WebhookClient({ url: webhookChatUrl });
+    } catch (error) {
+      logError('WEBHOOK_CHAT invalido. Espelho de chat desativado', error);
+    }
+  }
 
   const latestChatFile = findLatestLogFile(logsPath, '_chat.txt');
   const latestUserFile = findLatestLogFile(logsPath, '_user.txt');
@@ -1023,22 +1029,26 @@ const commandHandlers = {
   deletearquivo: handleDeleteFileCommand,
 };
 
+async function runStartupStep(label, handler) {
+  try {
+    await handler();
+  } catch (error) {
+    logError(`Inicializacao - ${label}`, error);
+  }
+}
+
 client.once('clientReady', async () => {
   logInfo(`Bot online como ${client.user.tag}`);
 
-  try {
-    await registerSlashCommands();
-    refreshInMemoryCaches();
-    await startLogMirrors();
-    startDataWatchers();
-    startAutomationLoop({ notify: sendAutomationMessage });
-    startBotAutoUpdateLoop({ notify: sendAutomationMessage });
-    startAntiCheatAlertLoop({ fetchTextChannel });
-    await refreshStatsPanel();
-    await refreshRankingPanel();
-  } catch (error) {
-    logError('Inicializacao do bot', error);
-  }
+  await runStartupStep('slash commands', registerSlashCommands);
+  await runStartupStep('cache local', async () => refreshInMemoryCaches());
+  await runStartupStep('automacoes', async () => startAutomationLoop({ notify: sendAutomationMessage }));
+  await runStartupStep('auto-update', async () => startBotAutoUpdateLoop({ notify: sendAutomationMessage }));
+  await runStartupStep('anticheat', async () => startAntiCheatAlertLoop({ fetchTextChannel }));
+  await runStartupStep('espelho de logs', startLogMirrors);
+  await runStartupStep('watchers de dados', async () => startDataWatchers());
+  await runStartupStep('painel de status', refreshStatsPanel);
+  await runStartupStep('ranking', refreshRankingPanel);
 
   setInterval(() => {
     refreshStatsPanel().catch((error) => logError('Atualizacao periodica do painel de status', error));
