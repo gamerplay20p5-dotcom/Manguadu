@@ -1,5 +1,8 @@
 require('dotenv').config({ quiet: true });
 
+const { discoverAndPersistPzPaths } = require('./lib/pz-path-discovery');
+discoverAndPersistPzPaths();
+
 const { Client, GatewayIntentBits, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, WebhookClient } = require('discord.js');
 const chokidar = require('chokidar');
 const fs = require('fs');
