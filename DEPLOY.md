@@ -23,12 +23,15 @@ PM2_APP_NAME=manguadu
 BOT_UPDATE_BRANCH=main
 BOT_AUTO_UPDATE_ENABLED=1
 BOT_AUTO_UPDATE_INTERVAL_MS=120000
+BOT_GITHUB_TOKEN=
 AUTOMATION_TIMEZONE=America/Sao_Paulo
 AUTOMATION_GRACE_MINUTES=5
 ```
 
 `BOT_AUTO_UPDATE_INTERVAL_MS` precisa ser pelo menos `60000`.
 `AUTOMATION_GRACE_MINUTES` define por quantos minutos depois do horario marcado o bot ainda pode disparar uma automacao.
+
+Como o repositorio e privado, `BOT_GITHUB_TOKEN` deve receber um fine-grained personal access token do GitHub limitado ao repositorio `Manguadu`, com permissao **Contents: Read-only**. O token fica somente no `.env` da VM, nao e colocado na URL do remote e nao aparece nos logs do bot.
 
 ## O que o update executa
 

@@ -6,6 +6,7 @@ PROJECT_DIR="${BOT_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 LOG_DIR="${BOT_UPDATE_LOG_DIR:-$PROJECT_DIR/data}"
 LOG_FILE="$LOG_DIR/update-bot.log"
 BRANCH="${BOT_UPDATE_BRANCH:-}"
+GITHUB_TOKEN_VALUE="${BOT_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 
 mkdir -p "$LOG_DIR"
 
@@ -39,6 +40,21 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
+REMOTE_URL="$(git remote get-url origin 2>/dev/null || true)"
+export GIT_TERMINAL_PROMPT=0
+
+if [[ "$REMOTE_URL" == https://github.com/* && -n "$GITHUB_TOKEN_VALUE" ]]; then
+  if ! command -v base64 >/dev/null 2>&1; then
+    echo "ERRO: comando base64 nao encontrado; necessario para autenticar o GitHub com seguranca."
+    exit 1
+  fi
+
+  GITHUB_BASIC_AUTH="$(printf 'x-access-token:%s' "$GITHUB_TOKEN_VALUE" | base64 | tr -d '\r\n')"
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+  export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $GITHUB_BASIC_AUTH"
+fi
+
 if [[ -z "$BRANCH" ]]; then
   BRANCH="$(git branch --show-current)"
 fi
@@ -58,8 +74,17 @@ BEFORE="$(git rev-parse --short HEAD)"
 echo "Commit atual: $BEFORE"
 echo "Branch: $BRANCH"
 
-git fetch --prune origin
-git pull --ff-only origin "$BRANCH"
+if ! git fetch --prune origin; then
+  if [[ "$REMOTE_URL" == https://github.com/* && -z "$GITHUB_TOKEN_VALUE" ]]; then
+    echo "ERRO: repositorio GitHub privado sem autenticacao. Preencha BOT_GITHUB_TOKEN no .env da VM."
+  fi
+  exit 128
+fi
+
+if ! git pull --ff-only origin "$BRANCH"; then
+  echo "ERRO: nao foi possivel atualizar a branch $BRANCH."
+  exit 128
+fi
 
 AFTER="$(git rev-parse --short HEAD)"
 echo "Commit depois do pull: $AFTER"

@@ -921,6 +921,7 @@ async function handleBotCommand(interaction) {
       `Timeout: ${Math.round(status.timeoutMs / 1000)}s`,
       `Auto-update: ${status.autoUpdateEnabled ? 'ativo' : 'desativado'}`,
       `Intervalo auto-update: ${Math.round(status.autoUpdateIntervalMs / 1000)}s`,
+      `GitHub privado: ${status.gitHubAuthConfigured ? 'autenticado' : 'token ausente'}`,
       `Log: ${status.logFile}`,
     ];
     await interaction.editReply(`\`\`\`\n${escapeCodeBlock(lines.join('\n'))}\n\`\`\``);
