@@ -61,6 +61,7 @@ const {
   startBotAutoUpdateLoop,
 } = require('./lib/bot-updater');
 const { startAntiCheatAlertLoop } = require('./lib/anticheat-alerts');
+const { handlePzCommand, pzCommandNames, pzSlashCommandBuilders } = require('./lib/pz-commands');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -715,6 +716,7 @@ const slashCommandBuilders = [
         ),
     )
     .addStringOption((option) => option.setName('nick').setDescription('Obrigatorio se alvo = jogador').setRequired(false).setAutocomplete(true)),
+  ...pzSlashCommandBuilders,
 ];
 
 async function registerSlashCommands() {
@@ -1028,6 +1030,10 @@ const commandHandlers = {
   rcon: handleRconCommand,
   deletearquivo: handleDeleteFileCommand,
 };
+
+for (const commandName of pzCommandNames) {
+  commandHandlers[commandName] = (interaction) => handlePzCommand(interaction, { ensureAdminChannel });
+}
 
 async function runStartupStep(label, handler) {
   try {

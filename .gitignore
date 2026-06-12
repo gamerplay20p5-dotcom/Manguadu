@@ -3,3 +3,4 @@ node_modules/
 data/automations.json
 data/anticheat-alerts-state.json
 data/*.log
+config/pz-maps.json
