@@ -4,7 +4,11 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { discoverAndPersistPzPaths } = require('../lib/pz-path-discovery');
+const {
+  choosePteroSaveCandidate,
+  discoverAndPersistPzPaths,
+  scorePteroSaveDirectory,
+} = require('../lib/pz-path-discovery');
 
 const ENV_KEYS = [
   'PZ_AUTO_DISCOVER_PATHS',
@@ -139,4 +143,27 @@ test('nao escolhe automaticamente quando dois servidores empatam', () => {
 
   restoreEnvironment();
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('seleciona o unico save do Pterodactyl mesmo no primeiro boot', () => {
+  const selection = choosePteroSaveCandidate([
+    scorePteroSaveDirectory('/Zomboid/Saves/Multiplayer/organic', []),
+  ]);
+
+  assert.equal(selection.ambiguous, false);
+  assert.equal(selection.candidate.directory, '/Zomboid/Saves/Multiplayer/organic');
+});
+
+test('prioriza o save que possui as assinaturas reais do mundo PZ', () => {
+  const selection = choosePteroSaveCandidate([
+    scorePteroSaveDirectory('/Zomboid/Saves/Multiplayer/vazio', []),
+    scorePteroSaveDirectory('/Zomboid/Saves/Multiplayer/organic', [
+      { name: 'players.db', isFile: true },
+      { name: 'map_meta.bin', isFile: true },
+      { name: 'map_100_200.bin', isFile: true },
+      { name: 'zpop_3_4.bin', isFile: true },
+    ]),
+  ]);
+
+  assert.equal(selection.candidate.directory, '/Zomboid/Saves/Multiplayer/organic');
 });

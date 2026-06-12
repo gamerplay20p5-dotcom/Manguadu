@@ -40,18 +40,17 @@ PZ_PATH_SCAN_ROOTS=/caminho/um,/caminho/dois
 PZ_AUTO_DISCOVER_PATHS=0
 ```
 
-3. Configure os caminhos exclusivos do Pterodactyl quando necessario:
+3. Com `PTERO_URL`, `PTERO_SERVER_ID` e `PTERO_API_KEY` configurados, o bot tambem procura automaticamente o save pela API do painel. Ele reconhece o diretorio correto por arquivos como `players.db`, `map_meta.bin`, `map_*.bin` e `zpop_*.bin`, preenchendo `PZ_SAVE_ROOT` no `.env`. O caminho do CSV do anticheat dentro do painel tambem e descoberto.
+
+Assim, normalmente estes campos ficam vazios:
 
 ```env
-# Caminho visto pelo gerenciador de arquivos do Pterodactyl.
-PZ_SAVE_ROOT=/Zomboid/Saves/Multiplayer/servertest
+PZ_SAVE_ROOT=
 PZ_WIPE_BACKUP_WAIT_MS=600000
-
-# Use este caminho quando o bot estiver fora do container do PZ.
-ANTICHEAT_PTERO_CSV_PATH=/Zomboid/Lua/PZAntiCheat_pending_alerts.csv
+ANTICHEAT_PTERO_CSV_PATH=
 ```
 
-O bot tenta primeiro o `ANTICHEAT_CSV_PATH` descoberto ou configurado manualmente; se o arquivo local nao existir, usa `ANTICHEAT_PTERO_CSV_PATH`. A chave Client API do Pterodactyl precisa permitir energia, console, leitura/edicao/exclusao de arquivos e criacao/restauracao de backups.
+Os campos continuam aceitando configuracao manual, que sempre tem prioridade. Se o painel possuir mais de um save com a mesma pontuacao, o bot nao escolhe sozinho para evitar wipe no mundo errado. A chave Client API do Pterodactyl precisa permitir energia, console, leitura/edicao/exclusao de arquivos e criacao/restauracao de backups.
 
 4. Reinicie e acompanhe o registro:
 

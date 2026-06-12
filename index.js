@@ -1,6 +1,6 @@
 require('dotenv').config({ quiet: true });
 
-const { discoverAndPersistPzPaths } = require('./lib/pz-path-discovery');
+const { discoverAndPersistPteroPaths, discoverAndPersistPzPaths } = require('./lib/pz-path-discovery');
 discoverAndPersistPzPaths();
 
 const { Client, GatewayIntentBits, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, WebhookClient } = require('discord.js');
@@ -1050,6 +1050,7 @@ async function runStartupStep(label, handler) {
 client.once('clientReady', async () => {
   logInfo(`Bot online como ${client.user.tag}`);
 
+  await runStartupStep('descoberta Pterodactyl', discoverAndPersistPteroPaths);
   await runStartupStep('slash commands', registerSlashCommands);
   await runStartupStep('cache local', async () => refreshInMemoryCaches());
   await runStartupStep('automacoes', async () => startAutomationLoop({ notify: sendAutomationMessage }));
