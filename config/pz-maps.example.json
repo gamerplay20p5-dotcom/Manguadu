@@ -1,0 +1,13 @@
+{
+  "maps": [
+    {
+      "id": "muldraugh",
+      "name": "Muldraugh",
+      "minX": 9600,
+      "minY": 8700,
+      "maxX": 11100,
+      "maxY": 10600,
+      "enabled": true
+    }
+  ]
+}

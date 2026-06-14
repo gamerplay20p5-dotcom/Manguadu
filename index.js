@@ -1,5 +1,8 @@
 require('dotenv').config({ quiet: true });
 
+const { discoverAndPersistPteroPaths, discoverAndPersistPzPaths } = require('./lib/pz-path-discovery');
+discoverAndPersistPzPaths();
+
 const { Client, GatewayIntentBits, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder, WebhookClient } = require('discord.js');
 const chokidar = require('chokidar');
 const fs = require('fs');
@@ -36,6 +39,13 @@ const {
   buildStatusEmbed,
 } = require('./lib/reports');
 const {
+  buildOnlineProfiles,
+  buildRankingPanelPayload,
+  buildServerPanelPayload,
+} = require('./lib/panel-reports');
+const { getDraftTheme } = require('./lib/panel-theme');
+const { getPlayerLink } = require('./lib/panel-player-links');
+const {
   buildServerOverview,
   extractPteroError,
   manageServer,
@@ -61,6 +71,7 @@ const {
   startBotAutoUpdateLoop,
 } = require('./lib/bot-updater');
 const { startAntiCheatAlertLoop } = require('./lib/anticheat-alerts');
+const { handlePzCommand, pzCommandNames, pzSlashCommandBuilders } = require('./lib/pz-commands');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -73,6 +84,7 @@ const state = {
   },
   fileOffsets: new Map(),
   fileRemainders: new Map(),
+  onlineSince: new Map(),
 };
 
 function getCsvBasePath() {
@@ -133,7 +145,7 @@ async function upsertSingleBotMessage(channel, payload) {
   const maxAge = 14 * 24 * 60 * 60 * 1000;
 
   if (botMessage) {
-    await botMessage.edit(payload);
+    await botMessage.edit({ ...payload, attachments: [] });
   } else {
     await channel.send(payload);
   }
@@ -169,8 +181,46 @@ async function refreshStatsPanel() {
   }
 
   const overview = await buildServerOverview();
-  const embed = buildServerStatusEmbed(overview, 'Atualizado automaticamente a cada 60 segundos');
-  await upsertSingleBotMessage(channel, { embeds: [embed] });
+  const playerRows = loadAllPlayerRows();
+  const onlineProfiles = await enrichOnlineProfiles(overview.onlinePlayers.names, playerRows);
+  const payload = buildServerPanelPayload(overview, {
+    onlineProfiles,
+  });
+  await upsertSingleBotMessage(channel, payload);
+}
+
+function formatOnlineDuration(startedAt) {
+  const minutes = Math.max(0, Math.floor((Date.now() - startedAt) / 60000));
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return hours > 0 ? `${hours}h ${remainingMinutes}m` : `${remainingMinutes}m`;
+}
+
+async function enrichOnlineProfiles(onlineNames, playerRows) {
+  const normalizedOnline = new Set(onlineNames.map((name) => name.toLowerCase()));
+  for (const key of state.onlineSince.keys()) {
+    if (!normalizedOnline.has(key)) state.onlineSince.delete(key);
+  }
+
+  const baseProfiles = buildOnlineProfiles(onlineNames, playerRows);
+  return Promise.all(
+    baseProfiles.map(async (profile) => {
+      const key = profile.nick.toLowerCase();
+      if (!state.onlineSince.has(key)) state.onlineSince.set(key, Date.now());
+      const discordId = getPlayerLink(profile.nick);
+      let avatarUrl = '';
+      if (discordId) {
+        const user = await client.users.fetch(discordId).catch(() => null);
+        avatarUrl = user?.displayAvatarURL({ extension: 'png', size: 128 }) || '';
+      }
+      return {
+        ...profile,
+        avatarUrl,
+        discordId,
+        onlineTime: formatOnlineDuration(state.onlineSince.get(key)),
+      };
+    }),
+  );
 }
 
 async function refreshRankingPanel() {
@@ -182,8 +232,31 @@ async function refreshRankingPanel() {
   const playerRows = loadAllPlayerRows();
   const serverBasePath = getLocalServerBasePath();
   const factionRows = serverBasePath ? readCsvRows(path.join(serverBasePath, 'factions.csv')) : [];
-  const embed = buildRankingEmbed(playerRows, factionRows);
-  await upsertSingleBotMessage(channel, { embeds: [embed] });
+  const deathRows = serverBasePath ? readCsvRawRows(path.join(serverBasePath, 'deaths.csv')) : [];
+  const payload = buildRankingPanelPayload(playerRows, factionRows, deathRows);
+  await upsertSingleBotMessage(channel, payload);
+}
+
+async function buildPanelPreview(panelType = 'status') {
+  const theme = getDraftTheme();
+  const playerRows = loadAllPlayerRows();
+  const serverBasePath = getLocalServerBasePath();
+  const factionRows = serverBasePath ? readCsvRows(path.join(serverBasePath, 'factions.csv')) : [];
+  const deathRows = serverBasePath ? readCsvRawRows(path.join(serverBasePath, 'deaths.csv')) : [];
+
+  if (panelType === 'ranking') {
+    return buildRankingPanelPayload(playerRows, factionRows, deathRows, { theme });
+  }
+
+  const overview = await buildServerOverview();
+  return buildServerPanelPayload(overview, {
+    theme,
+    onlineProfiles: await enrichOnlineProfiles(overview.onlinePlayers.names, playerRows),
+  });
+}
+
+async function refreshAllPanels() {
+  await Promise.all([refreshStatsPanel(), refreshRankingPanel()]);
 }
 
 function refreshInMemoryCaches() {
@@ -715,6 +788,7 @@ const slashCommandBuilders = [
         ),
     )
     .addStringOption((option) => option.setName('nick').setDescription('Obrigatorio se alvo = jogador').setRequired(false).setAutocomplete(true)),
+  ...pzSlashCommandBuilders,
 ];
 
 async function registerSlashCommands() {
@@ -916,6 +990,7 @@ async function handleBotCommand(interaction) {
       `Timeout: ${Math.round(status.timeoutMs / 1000)}s`,
       `Auto-update: ${status.autoUpdateEnabled ? 'ativo' : 'desativado'}`,
       `Intervalo auto-update: ${Math.round(status.autoUpdateIntervalMs / 1000)}s`,
+      `GitHub privado: ${status.gitHubAuthConfigured ? 'autenticado' : 'token ausente'}`,
       `Log: ${status.logFile}`,
     ];
     await interaction.editReply(`\`\`\`\n${escapeCodeBlock(lines.join('\n'))}\n\`\`\``);
@@ -1029,6 +1104,15 @@ const commandHandlers = {
   deletearquivo: handleDeleteFileCommand,
 };
 
+for (const commandName of pzCommandNames) {
+  commandHandlers[commandName] = (interaction) =>
+    handlePzCommand(interaction, {
+      buildPanelPreview,
+      ensureAdminChannel,
+      refreshPanels: refreshAllPanels,
+    });
+}
+
 async function runStartupStep(label, handler) {
   try {
     await handler();
@@ -1040,6 +1124,7 @@ async function runStartupStep(label, handler) {
 client.once('clientReady', async () => {
   logInfo(`Bot online como ${client.user.tag}`);
 
+  await runStartupStep('descoberta Pterodactyl', discoverAndPersistPteroPaths);
   await runStartupStep('slash commands', registerSlashCommands);
   await runStartupStep('cache local', async () => refreshInMemoryCaches());
   await runStartupStep('automacoes', async () => startAutomationLoop({ notify: sendAutomationMessage }));
