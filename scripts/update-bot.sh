@@ -81,6 +81,16 @@ if ! git fetch --prune origin; then
   exit 128
 fi
 
+if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+  if git show-ref --verify --quiet "refs/remotes/origin/main"; then
+    echo "AVISO: a branch remota $BRANCH nao existe mais; usando main."
+    BRANCH="main"
+  else
+    echo "ERRO: a branch remota $BRANCH nao existe e origin/main nao foi encontrada."
+    exit 128
+  fi
+fi
+
 if ! git pull --ff-only origin "$BRANCH"; then
   echo "ERRO: nao foi possivel atualizar a branch $BRANCH."
   exit 128

@@ -4,7 +4,13 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { parseAlerts } = require('../lib/anticheat-alerts');
+const {
+  buildAlertEmbed,
+  groupAlerts,
+  isAlertRecent,
+  parseAlertTimestamp,
+  parseAlerts,
+} = require('../lib/anticheat-alerts');
 const { pzCommandNames, pzSlashCommandBuilders } = require('../lib/pz-commands');
 const { createMapPng } = require('../lib/pz-map-renderer');
 const { parsePair } = require('../lib/pz-wipe');
@@ -44,6 +50,41 @@ test('parser do anticheat aceita o CSV emitido pelo mod', () => {
   assert.equal(alerts[0].username, 'Menta');
   assert.equal(alerts[0].detail, 'salto, impossivel');
   assert.equal(alerts[0].pos, '100,200,0');
+});
+
+test('anticheat interpreta horario local e descarta registros antigos', () => {
+  process.env.ANTICHEAT_TIMEZONE = 'America/Sao_Paulo';
+  process.env.ANTICHEAT_MAX_ALERT_AGE_MINUTES = '10';
+
+  const timestamp = parseAlertTimestamp('2026-06-15 12:00:00');
+  assert.equal(timestamp.toISOString(), '2026-06-15T15:00:00.000Z');
+  assert.equal(
+    isAlertRecent({ timestamp: '2026-06-15 11:40:00' }, Date.parse('2026-06-15T15:00:00Z')),
+    false,
+  );
+  assert.equal(
+    isAlertRecent({ timestamp: '2026-06-15 11:55:00' }, Date.parse('2026-06-15T15:00:00Z')),
+    true,
+  );
+
+  delete process.env.ANTICHEAT_TIMEZONE;
+  delete process.env.ANTICHEAT_MAX_ALERT_AGE_MINUTES;
+});
+
+test('anticheat agrupa repeticoes em um embed minimalista', () => {
+  const groups = groupAlerts([
+    { timestamp: '2026-06-15 12:00:00', username: 'Menta', steamId: '123', cheat: 'teleport', count: '1', detail: 'salto', pos: '1,2,0' },
+    { timestamp: '2026-06-15 12:00:02', username: 'Menta', steamId: '123', cheat: 'teleport', count: '2', detail: 'salto', pos: '2,3,0' },
+  ]);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].count, 2);
+
+  const embed = buildAlertEmbed(groups).toJSON();
+  assert.equal(embed.title, 'Alerta anticheat');
+  assert.match(embed.description, /Menta/);
+  assert.match(embed.description, /2 ocorrencias/);
+  assert.equal(embed.fields, undefined);
 });
 
 test('dados dos jogadores, mapas e coordenadas sao interpretados', () => {
