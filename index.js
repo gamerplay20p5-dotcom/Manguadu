@@ -684,7 +684,7 @@ const slashCommandBuilders = [
     ),
   new SlashCommandBuilder()
     .setName('automacao')
-    .setDescription('Cria e gerencia automacoes do Pterodactyl pelo bot')
+    .setDescription('Cria e gerencia automacoes do servidor pelo bot')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
@@ -904,8 +904,9 @@ async function handleServerCommand(interaction) {
   }
 
   const result = await manageServer(action);
+  const via = result.transport === 'docker' ? 'Docker/local' : 'Pterodactyl';
   await interaction.editReply(
-    result.ok ? `Comando ${action} enviado ao Pterodactyl com sucesso.` : `Falha ao comunicar com o Pterodactyl: ${extractPteroError(result)}`,
+    result.ok ? `Comando ${action} enviado via ${via} com sucesso.` : `Falha ao controlar o servidor: ${extractPteroError(result)}`,
   );
 }
 

@@ -13,10 +13,14 @@ const {
 const ENV_KEYS = [
   'PZ_AUTO_DISCOVER_PATHS',
   'PZ_LUA_PATH',
+  'PZ_CACHE_ROOT',
+  'PTERO_SERVER_ID',
+  'PTERO_VOLUME_ID',
   'PZ_PATH_SCAN_ROOTS',
   'CSV_BASE_PATH',
   'ANTICHEAT_CSV_PATH',
   'LOGS_PATH',
+  'PZ_SAVE_ROOT',
 ];
 
 function preserveEnvironment() {
@@ -38,6 +42,23 @@ function createPzLayout(root, name = 'server-a') {
   fs.mkdirSync(path.join(zomboid, 'Logs'), { recursive: true });
   fs.writeFileSync(path.join(lua, 'PZAntiCheat_pending_alerts.csv'), 'timestamp,username,steam_id,cheat,count,detail,pos\n');
   return { lua, friendHost, logs: path.join(zomboid, 'Logs') };
+}
+
+function createPteroCacheLayout(root, volumeId = 'd0db1408-0ecd-40fe-9af0-7d5a67442464') {
+  const cacheRoot = path.join(root, volumeId, '.cache');
+  const lua = path.join(cacheRoot, 'Lua');
+  const friendHost = path.join(lua, 'FriendHost_Data');
+  const saveRoot = path.join(cacheRoot, 'Saves', 'Multiplayer', 'organic');
+  fs.mkdirSync(path.join(friendHost, 'Jogadores'), { recursive: true });
+  fs.mkdirSync(path.join(friendHost, 'Servidor'), { recursive: true });
+  fs.mkdirSync(path.join(cacheRoot, 'Logs'), { recursive: true });
+  fs.mkdirSync(saveRoot, { recursive: true });
+  fs.writeFileSync(path.join(lua, 'PZAntiCheat_pending_alerts.csv'), 'timestamp,username,steam_id,cheat,count,detail,pos\n');
+  fs.writeFileSync(path.join(saveRoot, 'players.db'), '');
+  fs.writeFileSync(path.join(saveRoot, 'map_meta.bin'), '');
+  fs.writeFileSync(path.join(saveRoot, 'map_100_200.bin'), '');
+  fs.writeFileSync(path.join(saveRoot, 'zpop_3_4.bin'), '');
+  return { cacheRoot, lua, friendHost, logs: path.join(cacheRoot, 'Logs'), saveRoot, volumeId };
 }
 
 test('descobre os CSVs em Zomboid/Lua e preenche campos vazios do .env', () => {
@@ -93,6 +114,38 @@ test('configuracao manual tem prioridade sobre a descoberta automatica', () => {
 
   restoreEnvironment();
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('descobre layout real do volume Pterodactyl em .cache', () => {
+  const restoreEnvironment = preserveEnvironment();
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manguadu-ptero-cache-'));
+  const root = path.join(tempRoot, 'var', 'lib', 'pterodactyl', 'volumes');
+  const layout = createPteroCacheLayout(root);
+  const envPath = path.join(tempRoot, '.env');
+  fs.writeFileSync(envPath, 'PZ_LUA_PATH=\nPZ_CACHE_ROOT=\nPTERO_VOLUME_ID=\nCSV_BASE_PATH=\nANTICHEAT_CSV_PATH=\nLOGS_PATH=\nPZ_SAVE_ROOT=\n');
+
+  process.env.PZ_AUTO_DISCOVER_PATHS = '1';
+  process.env.PZ_PATH_SCAN_ROOTS = root;
+  process.env.PTERO_SERVER_ID = 'd0db1408';
+  delete process.env.PZ_LUA_PATH;
+  delete process.env.PZ_CACHE_ROOT;
+  delete process.env.PTERO_VOLUME_ID;
+  delete process.env.CSV_BASE_PATH;
+  delete process.env.ANTICHEAT_CSV_PATH;
+  delete process.env.LOGS_PATH;
+  delete process.env.PZ_SAVE_ROOT;
+
+  discoverAndPersistPzPaths({ envPath });
+
+  assert.equal(process.env.PZ_LUA_PATH, layout.lua);
+  assert.equal(process.env.PZ_CACHE_ROOT, layout.cacheRoot);
+  assert.equal(process.env.PTERO_VOLUME_ID, layout.volumeId);
+  assert.equal(process.env.CSV_BASE_PATH, layout.friendHost);
+  assert.equal(process.env.LOGS_PATH, layout.logs);
+  assert.equal(process.env.PZ_SAVE_ROOT, layout.saveRoot);
+
+  restoreEnvironment();
+  fs.rmSync(tempRoot, { recursive: true, force: true });
 });
 
 test('prepara os caminhos esperados mesmo antes dos mods criarem os CSVs', () => {
