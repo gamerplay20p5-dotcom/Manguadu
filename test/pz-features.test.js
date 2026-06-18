@@ -13,7 +13,7 @@ const {
 } = require('../lib/anticheat-alerts');
 const { pzCommandNames, pzSlashCommandBuilders } = require('../lib/pz-commands');
 const { createMapPng } = require('../lib/pz-map-renderer');
-const { parsePair } = require('../lib/pz-wipe');
+const { buildWipePlan, formatWipePlan, parsePair } = require('../lib/pz-wipe');
 
 test('todos os slash commands de PZ geram schemas validos e unicos', () => {
   const schemas = pzSlashCommandBuilders.map((builder) => builder.toJSON());
@@ -118,4 +118,47 @@ test('dados dos jogadores, mapas e coordenadas sao interpretados', () => {
   fs.rmSync(tempRoot, { recursive: true, force: true });
   delete process.env.CSV_BASE_PATH;
   delete process.env.PZ_MAPS_CONFIG_PATH;
+});
+
+test('wipe chunk usa pasta chunkdata e descreve intervalo real', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manguadu-wipe-chunk-'));
+  const saveRoot = path.join(tempRoot, 'Saves', 'Multiplayer', 'Pterodactyl');
+  fs.mkdirSync(path.join(saveRoot, 'chunkdata'), { recursive: true });
+  fs.writeFileSync(path.join(saveRoot, 'chunkdata', 'map_744_1648.bin'), '');
+
+  process.env.PZ_SAVE_ROOT = saveRoot;
+  process.env.CSV_BASE_PATH = tempRoot;
+
+  const plan = await buildWipePlan({ kind: 'chunk', target: '744,1648', force: true });
+  const formatted = formatWipePlan(plan);
+
+  assert.equal(plan.ok, true);
+  assert.equal(plan.storage, 'local');
+  assert.deepEqual(plan.files, ['chunkdata/map_744_1648.bin']);
+  assert.match(formatted, /Chunks: 744,1648 ate 744,1648/);
+  assert.match(formatted, /X 7440-7449/);
+
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+  delete process.env.PZ_SAVE_ROOT;
+  delete process.env.CSV_BASE_PATH;
+});
+
+test('wipe global mira db Logs e Saves no cache do servidor', async () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'manguadu-wipe-global-'));
+  fs.mkdirSync(path.join(tempRoot, 'db'), { recursive: true });
+  fs.mkdirSync(path.join(tempRoot, 'Logs'), { recursive: true });
+  fs.mkdirSync(path.join(tempRoot, 'Saves'), { recursive: true });
+
+  process.env.PZ_CACHE_ROOT = tempRoot;
+
+  const plan = await buildWipePlan({ kind: 'global' });
+  const formatted = formatWipePlan(plan);
+
+  assert.equal(plan.ok, true);
+  assert.equal(plan.kind, 'global');
+  assert.deepEqual(plan.files, ['db', 'Logs', 'Saves']);
+  assert.match(formatted, /Pastas alvo: db, Logs, Saves/);
+
+  fs.rmSync(tempRoot, { recursive: true, force: true });
+  delete process.env.PZ_CACHE_ROOT;
 });
