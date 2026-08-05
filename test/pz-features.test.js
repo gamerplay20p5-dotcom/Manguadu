@@ -96,11 +96,11 @@ test('dados dos jogadores, mapas e coordenadas sao interpretados', () => {
   fs.mkdirSync(playerDir, { recursive: true });
   fs.mkdirSync(serverDir, { recursive: true });
   fs.writeFileSync(
-    path.join(playerDir, 'player_Menta.csv'),
+    path.join(playerDir, 'player_Menta.txt'),
     'username;profession;traits;zombiekills;hourssurvived;x;y;z\nMenta;fireofficer;Strong,Brave;42;12.5;10600;9800;0\n',
   );
-  fs.writeFileSync(path.join(playerDir, 'playerperks_Menta.csv'), 'username;fitness;strength\nMenta;6;8\n');
-  fs.writeFileSync(path.join(serverDir, 'safehouses.csv'), 'title;owner;x;y;x2;y2\nBase;Menta;10500;9700;10600;9800\n');
+  fs.writeFileSync(path.join(playerDir, 'playerperks_Menta.txt'), 'username;fitness;strength\nMenta;6;8\n');
+  fs.writeFileSync(path.join(serverDir, 'safehouses.txt'), 'title;owner;x;y;x2;y2\nBase;Menta;10500;9700;10600;9800\n');
   fs.writeFileSync(mapsPath, JSON.stringify({ maps: [{ id: 'teste', name: 'Teste', minX: 9000, minY: 9000, maxX: 12000, maxY: 12000 }] }));
 
   process.env.CSV_BASE_PATH = tempRoot;

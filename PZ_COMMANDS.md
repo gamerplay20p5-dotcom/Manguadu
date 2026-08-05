@@ -12,7 +12,9 @@ cp config/pz-maps.example.json config/pz-maps.json
 nano config/pz-maps.json
 ```
 
-2. A descoberta dos arquivos de mod e automatica por padrao. Ao iniciar, o bot procura uma pasta `Zomboid/Lua`, reconhece `FriendHost_Data/Jogadores`, `FriendHost_Data/Servidor` e `PZAntiCheat_pending_alerts.csv`, aplica os caminhos imediatamente e completa os campos vazios do `.env`. Se os mods ainda nao tiverem criado os arquivos no primeiro boot, ele salva os caminhos esperados dentro da pasta Lua encontrada e passa a enxergar os CSVs assim que surgirem.
+2. A descoberta dos arquivos de mod e automatica por padrao. Ao iniciar, o bot procura uma pasta `Zomboid/Lua`, reconhece inclusive uma `FriendHost_Data` vazia ou parcial, aplica os caminhos imediatamente e completa os campos vazios do `.env`. Se os mods ainda nao tiverem criado os arquivos no primeiro boot, ele salva os caminhos esperados e passa a enxerga-los assim que surgirem.
+
+O FriendHost atual grava dados delimitados por ponto e virgula em `.txt`. O bot prefere esse formato e mantem leitura compativel com os antigos `.csv.txt` e `.csv`. A variavel `CSV_BASE_PATH` conserva o nome antigo apenas para nao quebrar instalacoes existentes.
 
 Os locais verificados incluem `/root`, `/home`, `/home/container`, `/mnt/server`, `/srv` e volumes em `/var/lib/pterodactyl/volumes`. O log de inicializacao mostra `Descoberta PZ` quando encontra os arquivos.
 
@@ -64,7 +66,7 @@ pm2 logs manguadu --lines 100
 - `/online`, `/info`, `/skills`, `/traits` e `/rank`
 - `/localizar_veiculo`, `/gps`, `/satelite` e `/mapas`
 
-Os comandos dependem dos CSVs apontados por `CSV_BASE_PATH`. A localizacao de veiculos exige um CSV cujo nome contenha `vehicle` dentro da pasta `Servidor`.
+Os comandos dependem dos arquivos FriendHost apontados por `CSV_BASE_PATH`. A localizacao de veiculos aceita `.txt`, `.csv.txt` ou `.csv` cujo nome contenha `vehicle` dentro da pasta `Servidor`.
 
 ## Administracao
 

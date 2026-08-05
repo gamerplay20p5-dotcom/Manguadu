@@ -72,6 +72,15 @@ const {
 } = require('./lib/bot-updater');
 const { startAntiCheatAlertLoop } = require('./lib/anticheat-alerts');
 const { handlePzCommand, pzCommandNames, pzSlashCommandBuilders } = require('./lib/pz-commands');
+const {
+  getPlayerFileCandidates,
+  getServerFileCandidates,
+  isFriendHostDataFile,
+  isFriendHostPerksFile,
+  resolvePlayerFile,
+  resolveServerFile,
+  stripFriendHostExtension,
+} = require('./lib/friendhost-files');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -170,7 +179,7 @@ function loadAllPlayerRows() {
   }
 
   return getSafePlayerNames()
-    .map((nick) => readLatestCsvRow(path.join(playersBasePath, nick, `player_${nick}.csv`)))
+    .map((nick) => readLatestCsvRow(resolvePlayerFile(playersBasePath, nick, 'player')))
     .filter(Boolean);
 }
 
@@ -231,8 +240,8 @@ async function refreshRankingPanel() {
 
   const playerRows = loadAllPlayerRows();
   const serverBasePath = getLocalServerBasePath();
-  const factionRows = serverBasePath ? readCsvRows(path.join(serverBasePath, 'factions.csv')) : [];
-  const deathRows = serverBasePath ? readCsvRawRows(path.join(serverBasePath, 'deaths.csv')) : [];
+  const factionRows = serverBasePath ? readCsvRows(resolveServerFile(serverBasePath, 'factions')) : [];
+  const deathRows = serverBasePath ? readCsvRawRows(resolveServerFile(serverBasePath, 'deaths')) : [];
   const payload = buildRankingPanelPayload(playerRows, factionRows, deathRows);
   await upsertSingleBotMessage(channel, payload);
 }
@@ -241,8 +250,8 @@ async function buildPanelPreview(panelType = 'status') {
   const theme = getDraftTheme();
   const playerRows = loadAllPlayerRows();
   const serverBasePath = getLocalServerBasePath();
-  const factionRows = serverBasePath ? readCsvRows(path.join(serverBasePath, 'factions.csv')) : [];
-  const deathRows = serverBasePath ? readCsvRawRows(path.join(serverBasePath, 'deaths.csv')) : [];
+  const factionRows = serverBasePath ? readCsvRows(resolveServerFile(serverBasePath, 'factions')) : [];
+  const deathRows = serverBasePath ? readCsvRawRows(resolveServerFile(serverBasePath, 'deaths')) : [];
 
   if (panelType === 'ranking') {
     return buildRankingPanelPayload(playerRows, factionRows, deathRows, { theme });
@@ -266,7 +275,7 @@ function refreshInMemoryCaches() {
 
   if (playersBasePath) {
     for (const nick of getSafePlayerNames()) {
-      const perksFile = path.join(playersBasePath, nick, `playerperks_${nick}.csv`);
+      const perksFile = resolvePlayerFile(playersBasePath, nick, 'perks');
       const latestPerks = readLatestCsvRow(perksFile);
       if (latestPerks) {
         state.perksCache.set(nick, latestPerks);
@@ -274,7 +283,7 @@ function refreshInMemoryCaches() {
     }
   }
 
-  state.totalDeathsCache = serverBasePath ? readCsvRawRows(path.join(serverBasePath, 'deaths.csv')).length : 0;
+  state.totalDeathsCache = serverBasePath ? readCsvRawRows(resolveServerFile(serverBasePath, 'deaths')).length : 0;
 }
 
 async function sendEvolutionMessage(content) {
@@ -324,7 +333,11 @@ async function processPerksSnapshot(nick, latestRow) {
 }
 
 async function handlePerksFileChange(filePath) {
-  const nick = path.basename(filePath).replace('playerperks_', '').replace('.csv', '');
+  const nick = stripFriendHostExtension(path.basename(filePath)).replace(/^playerperks_/i, '');
+  const preferredFile = resolvePlayerFile(getLocalPlayersBasePath(), nick, 'perks');
+  if (preferredFile && path.resolve(preferredFile) !== path.resolve(filePath)) {
+    return;
+  }
   const rows = readCsvRows(filePath);
   if (rows.length === 0) {
     return;
@@ -352,6 +365,10 @@ function extractNickFromDeathRow(row) {
 }
 
 async function handleDeathsFileChange(filePath) {
+  const preferredFile = resolveServerFile(getLocalServerBasePath(), 'deaths');
+  if (preferredFile && path.resolve(preferredFile) !== path.resolve(filePath)) {
+    return;
+  }
   const rows = readCsvRawRows(filePath);
   if (rows.length <= state.totalDeathsCache) {
     state.totalDeathsCache = rows.length;
@@ -374,7 +391,7 @@ async function scanPerkChanges() {
   }
 
   for (const nick of getSafePlayerNames()) {
-    const perksFile = path.join(playersBasePath, nick, `playerperks_${nick}.csv`);
+    const perksFile = resolvePlayerFile(playersBasePath, nick, 'perks');
     const latestPerks = readLatestCsvRow(perksFile);
     if (latestPerks) {
       await processPerksSnapshot(nick, latestPerks);
@@ -384,7 +401,7 @@ async function scanPerkChanges() {
 
 async function scanDeathChanges() {
   const serverBasePath = getLocalServerBasePath();
-  const deathsFile = serverBasePath ? path.join(serverBasePath, 'deaths.csv') : '';
+  const deathsFile = serverBasePath ? resolveServerFile(serverBasePath, 'deaths') : '';
   if (!deathsFile || !fileExists(deathsFile)) {
     state.totalDeathsCache = 0;
     return;
@@ -569,28 +586,34 @@ async function startLogMirrors() {
 }
 
 function startDataWatchers() {
-  const playersBasePath = getLocalPlayersBasePath();
-  const serverBasePath = getLocalServerBasePath();
-  const deathsFile = serverBasePath ? path.join(serverBasePath, 'deaths.csv') : '';
+  const friendHostBase = getCsvBasePath();
+  if (!friendHostBase) return;
 
-  if (playersBasePath && fs.existsSync(playersBasePath)) {
-    chokidar
-      .watch(path.join(playersBasePath, '**', 'playerperks_*.csv'), {
-        ignoreInitial: true,
-        awaitWriteFinish: true,
-      })
-      .on('add', handlePerksFileChange)
-      .on('change', handlePerksFileChange)
-      .on('error', (error) => logError('Watcher de perks', error));
-  }
+  // Watch the expected parent when FriendHost_Data has not been created yet.
+  // This keeps first boot automatic without periodically rescanning the disk.
+  const watchRoot = fs.existsSync(friendHostBase) ? friendHostBase : path.dirname(friendHostBase);
+  if (!fs.existsSync(watchRoot)) return;
+  const watchDepth = watchRoot === friendHostBase ? 3 : 4;
 
-  if (deathsFile) {
-    chokidar
-      .watch(deathsFile, { ignoreInitial: true, awaitWriteFinish: true })
-      .on('add', handleDeathsFileChange)
-      .on('change', handleDeathsFileChange)
-      .on('error', (error) => logError('Watcher de mortes', error));
-  }
+  const handleDataFile = (filePath) => {
+    if (isFriendHostPerksFile(filePath)) {
+      handlePerksFileChange(filePath).catch((error) => logError('Watcher de perks', error));
+      return;
+    }
+    if (stripFriendHostExtension(path.basename(filePath)).toLowerCase() === 'deaths') {
+      handleDeathsFileChange(filePath).catch((error) => logError('Watcher de mortes', error));
+    }
+  };
+
+  chokidar
+    .watch(watchRoot, {
+      depth: watchDepth,
+      ignoreInitial: true,
+      awaitWriteFinish: true,
+    })
+    .on('add', handleDataFile)
+    .on('change', handleDataFile)
+    .on('error', (error) => logError('Watcher de dados FriendHost', error));
 }
 
 function isRestrictedToAdminChannel(interaction) {
@@ -621,16 +644,15 @@ function buildDeleteTargets(scope, nickInput) {
         break;
       }
 
-      const dir = path.join(playersBasePath, nick);
-      files.push(path.join(dir, `player_${nick}.csv`));
-      files.push(path.join(dir, `playerperks_${nick}.csv`));
+      files.push(...getPlayerFileCandidates(playersBasePath, nick, 'player'));
+      files.push(...getPlayerFileCandidates(playersBasePath, nick, 'perks'));
     }
 
     if (serverBasePath) {
-      files.push(path.join(serverBasePath, 'deaths.csv'));
-      files.push(path.join(serverBasePath, 'factions.csv'));
-      files.push(path.join(serverBasePath, 'safehouses.csv'));
-      files.push(path.join(serverBasePath, 'players_online.csv'));
+      files.push(...getServerFileCandidates(serverBasePath, 'deaths'));
+      files.push(...getServerFileCandidates(serverBasePath, 'factions'));
+      files.push(...getServerFileCandidates(serverBasePath, 'safehouses'));
+      files.push(...getServerFileCandidates(serverBasePath, 'players_online'));
     }
 
     return files;
@@ -641,7 +663,7 @@ function buildDeleteTargets(scope, nickInput) {
       return [];
     }
 
-    return getSafePlayerNames().map((nick) => path.join(playersBasePath, nick, `playerinventory_${nick}.csv`));
+    return getSafePlayerNames().flatMap((nick) => getPlayerFileCandidates(playersBasePath, nick, 'inventory'));
   }
 
   if (scope === 'jogador') {
@@ -649,7 +671,11 @@ function buildDeleteTargets(scope, nickInput) {
     if (!files) {
       return null;
     }
-    return [files.playerFile, files.perksFile, files.inventoryFile];
+    return [
+      ...getPlayerFileCandidates(playersBasePath, files.actualNick, 'player'),
+      ...getPlayerFileCandidates(playersBasePath, files.actualNick, 'perks'),
+      ...getPlayerFileCandidates(playersBasePath, files.actualNick, 'inventory'),
+    ];
   }
 
   if (scope === 'tudo') {
@@ -657,7 +683,7 @@ function buildDeleteTargets(scope, nickInput) {
     if (!basePath || !fs.existsSync(basePath)) {
       return [];
     }
-    return collectFilesRecursively(basePath, (filePath) => /\.csv$/i.test(filePath), 8, [], 2000);
+    return collectFilesRecursively(basePath, (filePath) => isFriendHostDataFile(filePath), 8, [], 2000);
   }
 
   return [];
@@ -772,7 +798,7 @@ const slashCommandBuilders = [
     .addStringOption((option) => option.setName('comando').setDescription('Comando do servidor').setRequired(true)),
   new SlashCommandBuilder()
     .setName('deletearquivo')
-    .setDescription('Apaga CSVs do FriendHost para forcar a recriacao')
+    .setDescription('Apaga dados do FriendHost para forcar a recriacao')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false)
     .addStringOption((option) =>
@@ -835,7 +861,7 @@ async function handleStatusCommand(interaction) {
     await interaction.editReply(
       snapshot.availablePlayers.length > 0
         ? `Jogador nao encontrado.\n\n${buildPlayersListMessage(snapshot.availablePlayers)}`
-        : 'Jogador nao encontrado e nenhum CSV de jogador foi localizado.',
+        : 'Jogador nao encontrado e nenhum arquivo do FriendHost foi localizado.',
     );
     return;
   }
@@ -857,7 +883,7 @@ async function handleStatusCompleteCommand(interaction) {
     await interaction.editReply(
       snapshot.availablePlayers.length > 0
         ? `Jogador nao encontrado.\n\n${buildPlayersListMessage(snapshot.availablePlayers)}`
-        : 'Jogador nao encontrado e nenhum CSV de jogador foi localizado.',
+        : 'Jogador nao encontrado e nenhum arquivo do FriendHost foi localizado.',
     );
     return;
   }

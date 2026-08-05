@@ -198,6 +198,31 @@ test('nao escolhe automaticamente quando dois servidores empatam', () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('reconhece FriendHost parcial com os novos arquivos txt', () => {
+  const restoreEnvironment = preserveEnvironment();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manguadu-partial-'));
+  const lua = path.join(root, 'server-a', '.cache', 'Lua');
+  const friendHost = path.join(lua, 'FriendHost_Data');
+  fs.mkdirSync(path.join(friendHost, 'Servidor'), { recursive: true });
+  fs.writeFileSync(path.join(friendHost, 'Servidor', 'world.txt'), '2026;12:00');
+  const envPath = path.join(root, '.env');
+  fs.writeFileSync(envPath, 'PZ_LUA_PATH=\nCSV_BASE_PATH=\n');
+
+  process.env.PZ_AUTO_DISCOVER_PATHS = '1';
+  process.env.PZ_PATH_SCAN_ROOTS = root;
+  delete process.env.PZ_LUA_PATH;
+  delete process.env.CSV_BASE_PATH;
+  delete process.env.ANTICHEAT_CSV_PATH;
+  delete process.env.LOGS_PATH;
+
+  discoverAndPersistPzPaths({ envPath });
+  assert.equal(process.env.PZ_LUA_PATH, lua);
+  assert.equal(process.env.CSV_BASE_PATH, friendHost);
+
+  restoreEnvironment();
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('seleciona o unico save do Pterodactyl mesmo no primeiro boot', () => {
   const selection = choosePteroSaveCandidate([
     scorePteroSaveDirectory('/Zomboid/Saves/Multiplayer/organic', []),
