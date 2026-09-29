@@ -1,4 +1,15 @@
-# Comandos Project Zomboid
+# Friendhost - PZ/Bot: comandos Project Zomboid
+
+Este é o guia operacional do bot Python para administradores da comunidade. A identidade do produto foi atualizada para Friendhost - PZ/Bot; `manguadu` continua como o nome do pacote e módulo Python para inicialização.
+
+Leia [README.md](README.md) para visão geral do projeto e [DEPLOY.md](DEPLOY.md) para instalar o runtime Python.
+
+O runtime completo do bot e Python. Ele oferece `/config_bot`, `/bot`, `/servidor`, `/rcon`,
+`/status`, `/statuscomplete`, `/automacao`, tickets, WL com `adduser` e os comandos publicos
+`/online`, `/info`, `/skills`, `/traits`, `/rank`, `/localizar_veiculo`,
+`/mapas`, `/gps`, `/satelite`, `/logs`, `/safehouse`, `/deletearquivo`, os comandos de whitelist,
+administracao/jogador e teleport, e os comandos de wipe. Os painéis, automações,
+alertas PZAntiCheat, espelho de logs e tarefas recorrentes também rodam no runtime Python.
 
 O bot registra os comandos pelo sistema oficial de slash commands do Discord. Com `GUILD_ID` preenchido, eles aparecem imediatamente naquela guild; sem `GUILD_ID`, o registro e global e pode demorar para propagar.
 
@@ -7,7 +18,7 @@ O bot registra os comandos pelo sistema oficial de slash commands do Discord. Co
 1. Crie o arquivo de mapas sem versionar as coordenadas particulares do servidor:
 
 ```bash
-cd /root/Manguadu
+cd /caminho/do/bot
 cp config/pz-maps.example.json config/pz-maps.json
 nano config/pz-maps.json
 ```
@@ -57,8 +68,8 @@ Os campos continuam aceitando configuracao manual, que sempre tem prioridade. Se
 4. Reinicie e acompanhe o registro:
 
 ```bash
-pm2 restart manguadu --update-env
-pm2 logs manguadu --lines 100
+pm2 restart friendhost-pz-bot --update-env
+pm2 logs friendhost-pz-bot --lines 100
 ```
 
 ## Comandos publicos
@@ -67,6 +78,16 @@ pm2 logs manguadu --lines 100
 - `/localizar_veiculo`, `/gps`, `/satelite` e `/mapas`
 
 Os comandos dependem dos arquivos FriendHost apontados por `CSV_BASE_PATH`. A localizacao de veiculos aceita `.txt`, `.csv.txt` ou `.csv` cujo nome contenha `vehicle` dentro da pasta `Servidor`.
+
+## Painéis e automações
+
+- `/painel config` edita banner, thumbnail, cores, título, descrição e imagem do ranking; `/painel preview` mostra o rascunho e `/painel salvar` aplica o tema.
+- `/painel jogadores vincular|desvincular` relaciona o nick PZ a uma conta Discord.
+- `/painel restart|stop|recursos` controla o servidor e exibe recursos.
+- `/automacao criar|listar|remover|pausar|retomar|executar|backupagora` gerencia rotinas diárias ou por dia da semana.
+- `/config_bot` permite escolher os canais de status, ranking, evolução e anticheat. As mensagens de status e ranking são atualizadas a cada 60 segundos.
+
+As rotinas monitoram aumentos de skills, novas mortes FriendHost e os logs de chat/login/logout. Alertas PZAntiCheat são agrupados e encaminhados ao canal configurado. `WEBHOOK_CHAT` continua opcional para espelhar as mensagens do jogo.
 
 ## Administracao
 

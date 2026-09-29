@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import struct
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from manguadu.config_store import ConfigStore
+from manguadu.credentials import decrypt_password, encrypt_password
+from manguadu.lore import evaluate_lore
+from manguadu.rcon import _packet, adduser_command, generate_password, send_rcon_command
+
+
+def test_ticket_and_whitelist_state_survive_restart(tmp_path: Path) -> None:
+    path = tmp_path / "bot.sqlite3"
+    store = ConfigStore(path)
+    store.set_value(11, "channels", "ticket_panel", 123)
+    store.set_value(11, "channels", "wl_decisions", 456)
+    store.set_value(11, "wl", "auto_approve", True)
+    store.create_ticket(11, 22, 33)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_ticket(11, 22, 34)
+    secret = "token-internal-test"
+    ciphertext = encrypt_password("SenhaEscolhida123!", secret)
+    store.save_request(33, 11, 22, "Jogador", "Sobrevivente", "Minha lore", 0.4, "review", ciphertext)
+    assert "SenhaEscolhida123!" not in path.read_bytes().decode("latin1")
+    store.close()
+
+    store = ConfigStore(path)
+    assert store.get_settings(11)["channels"]["ticket_panel"] == 123
+    assert store.get_settings(11)["channels"]["wl_decisions"] == 456
+    assert store.get_settings(11)["wl"]["auto_approve"]
+    assert store.get_open_ticket(11, 22)["channel_id"] == 33
+    assert decrypt_password(store.get_request(33)["password_ciphertext"], secret) == "SenhaEscolhida123!"
+    store.clear_request_password(33)
+    assert store.get_request(33)["password_ciphertext"] == ""
+    store.record_whitelist(11, "Jogador", 22, 33)
+    assert store.username_owner(11, "jogador") == 22
+    store.close_ticket(33)
+    assert store.get_open_ticket(11, 22) is None
+    store.close()
+
+
+def test_lore_triage_explains_overlap_and_missing_context() -> None:
+    reference = "Knox ficou isolada após a epidemia. Muldraugh perdeu comunicação, Rosewood virou abrigo, sobreviventes buscaram água e remédios."
+    good = "Meu personagem saiu de Muldraugh quando a epidemia isolou Knox. Em Rosewood, procurou abrigo para sobreviventes e reuniu água e remédios com sua irmã antes do inverno chegar."
+    bad = "Meu personagem nasceu em um reino mágico de dragões e cavaleiros. Sua missão era encontrar uma espada dourada escondida em um castelo e defender os portões de uma invasão de monstros antigos."
+    accepted = evaluate_lore(reference, good)
+    rejected = evaluate_lore(reference, bad)
+    assert accepted.approved and "muldraugh" in accepted.common_terms
+    assert not rejected.approved and "não traz referências" in rejected.reason
+
+
+def test_adduser_rejects_console_injection_and_generated_password() -> None:
+    password = generate_password()
+    assert adduser_command("Malaio_01", password) == f'adduser "Malaio_01" "{password}"'
+    assert adduser_command("Malaio_01", "SenhaEscolhida123!")
+    with pytest.raises(ValueError):
+        adduser_command('nick";stop', password)
+    with pytest.raises(ValueError):
+        adduser_command("Jogador", 'senha" stop')
+
+
+def test_rcon_auth_and_adduser_command() -> None:
+    async def scenario() -> None:
+        commands = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                payload = await reader.readexactly(size)
+                auth_id, packet_type = struct.unpack("<ii", payload[:8])
+                assert packet_type == 3 and payload[8:-2] == b"secret"
+                writer.write(_packet(auth_id, 0, "") + _packet(auth_id, 2, ""))
+                await writer.drain()
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                payload = await reader.readexactly(size)
+                command_id, packet_type = struct.unpack("<ii", payload[:8])
+                assert packet_type == 2
+                commands.append(payload[8:-2].decode())
+                writer.write(_packet(command_id, 0, "User added"))
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            result = await send_rcon_command("127.0.0.1", port, "secret", 'adduser "Jogador" "Senha123456"')
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert result.ok and result.output == "User added"
+        assert commands == ['adduser "Jogador" "Senha123456"']
+
+    asyncio.run(scenario())
+
+
+def test_decisions_go_to_configured_discord_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    from manguadu import discord_bot
+
+    store = ConfigStore(":memory:")
+    store.set_value(11, "channels", "wl_decisions", 456)
+    bot = discord_bot.ManguaduBot(store)
+    sent = []
+
+    class Channel:
+        async def send(self, *, embed: object, allowed_mentions: object) -> None:
+            sent.append(embed)
+
+    channel = Channel()
+    monkeypatch.setattr(discord_bot, "_configured_text_channel", lambda _guild, channel_id: channel if channel_id == 456 else None)
+    guild = SimpleNamespace(id=11)
+    request = {"user_id": 22, "username": "Jogador", "character_name": "Sobrevivente", "channel_id": 33, "lore": "História de teste"}
+
+    async def scenario() -> None:
+        await bot.post_decision(guild, request, True, "Lore coerente")
+        await bot.post_decision(guild, request, False, "Lore incompatível")
+
+    asyncio.run(scenario())
+    assert len(sent) == 2
+    assert sent[0].title == "✅ WL aprovada"
+    assert sent[1].title == "❌ WL reprovada"
+    assert sent[0].fields[2].value == "Lore coerente"
+    assert sent[1].fields[2].value == "Lore incompatível"
+    store.close()
+
+
+def test_discord_views_fit_rows_and_public_buttons_persist() -> None:
+    from manguadu.discord_bot import (
+        ManguaduBot, PublicTicketView, ReviewView, TicketActionView,
+        WhitelistChannelsView, WhitelistConfigView,
+    )
+
+    store = ConfigStore(":memory:")
+    bot = ManguaduBot(store)
+    commands = bot.tree.get_commands()
+    assert {command.name for command in commands} == {
+        "config_bot", "bot", "online", "info", "skills", "traits", "rank",
+        "localizar_veiculo", "mapas", "gps", "satelite", "wipe_zeds", "wipe", "wipe_force",
+        "wipe_teste", "wipe_chunk", "wipe_chunk_force", "wipe_chunk_teste",
+        "rcon", "servidor", "status", "statuscomplete", "logs", "safehouse",
+        "adduser", "removeuserfromwhitelist", "banid", "kick", "kick_all",
+        "godmode", "invisible", "grantadmin", "removeadmin", "tpto", "tp",
+        "servermsg", "deletearquivo", "painel", "automacao",
+    }
+    assert all(command.to_dict(bot.tree)["name"] == command.name for command in commands)
+    assert len(WhitelistConfigView(bot, 11).to_components()) <= 5
+    assert len(WhitelistChannelsView(bot, 11).to_components()) <= 5
+    assert all(view.is_persistent() for view in (PublicTicketView(bot), TicketActionView(bot), ReviewView(bot)))
+    store.close()
+
+
+def test_audit_requires_private_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    from manguadu import discord_bot
+
+    guild = SimpleNamespace(default_role=object())
+
+    class Channel:
+        def __init__(self, public: bool):
+            self.public = public
+
+        def permissions_for(self, _role: object) -> SimpleNamespace:
+            return SimpleNamespace(view_channel=self.public)
+
+    monkeypatch.setattr(discord_bot, "_configured_text_channel", lambda _guild, _id: Channel(public=False))
+    assert discord_bot._configured_private_channel(guild, 1) is not None
+    monkeypatch.setattr(discord_bot, "_configured_text_channel", lambda _guild, _id: Channel(public=True))
+    assert discord_bot._configured_private_channel(guild, 1) is None

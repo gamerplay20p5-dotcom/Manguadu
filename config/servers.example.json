@@ -1,0 +1,75 @@
+{
+  "_comentario": [
+    "Copie para config/servers.json e ajuste. Enquanto esse arquivo NAO existir,",
+    "o bot continua com o servidor unico das variaveis de ambiente de sempre.",
+    "",
+    "Nenhum segredo mora aqui: apiKeyEnv e passwordEnv apontam o NOME da",
+    "variavel de ambiente onde o valor esta. Assim este arquivo pode ir para o",
+    "git sem vazar chave nem senha.",
+    "",
+    "order define a ordem de dureza e e usada para saber se a migracao esta",
+    "subindo (facil -> hard) ou descendo."
+  ],
+  "servers": [
+    {
+      "id": "facil",
+      "label": "Manguadu Facil",
+      "difficulty": "easy",
+      "order": 1,
+      "connectAddress": "jogar.exemplo.com:16261",
+      "ptero": {
+        "serverId": "COLOQUE_O_ID_CURTO_DO_PAINEL",
+        "apiKeyEnv": "PTERO_API_KEY"
+      },
+      "rcon": {
+        "host": "127.0.0.1",
+        "port": 27015,
+        "passwordEnv": "RCON_PASSWORD_FACIL"
+      },
+      "paths": {
+        "lua": "/Zomboid/Lua",
+        "save": "/Zomboid/Saves/Multiplayer"
+      }
+    },
+    {
+      "id": "medio",
+      "label": "Manguadu Medio",
+      "difficulty": "medium",
+      "order": 2,
+      "connectAddress": "jogar.exemplo.com:16271",
+      "ptero": {
+        "serverId": "COLOQUE_O_ID_CURTO_DO_PAINEL",
+        "apiKeyEnv": "PTERO_API_KEY"
+      },
+      "rcon": {
+        "host": "127.0.0.1",
+        "port": 27016,
+        "passwordEnv": "RCON_PASSWORD_MEDIO"
+      },
+      "paths": {
+        "lua": "/Zomboid/Lua",
+        "save": "/Zomboid/Saves/Multiplayer"
+      }
+    },
+    {
+      "id": "hard",
+      "label": "Manguadu Hardcore",
+      "difficulty": "hard",
+      "order": 3,
+      "connectAddress": "jogar.exemplo.com:16281",
+      "ptero": {
+        "serverId": "COLOQUE_O_ID_CURTO_DO_PAINEL",
+        "apiKeyEnv": "PTERO_API_KEY"
+      },
+      "rcon": {
+        "host": "127.0.0.1",
+        "port": 27017,
+        "passwordEnv": "RCON_PASSWORD_HARD"
+      },
+      "paths": {
+        "lua": "/Zomboid/Lua",
+        "save": "/Zomboid/Saves/Multiplayer"
+      }
+    }
+  ]
+}
