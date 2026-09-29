@@ -95,3 +95,9 @@ O canal de decisões recebe aprovações e reprovações com os motivos no Disco
 - `.venv/`
 
 O bot requer Python 3.11 ou superior. `ffmpeg` é opcional para thumbnails de vídeos nos painéis. Veja [README.md](README.md) para visão geral, requisitos e comandos.
+
+## Diagnostico RCON
+
+Configure no `.env` a mesma senha usada em `RCONPassword` no servidor PZ, alem de `RCON_HOST` e `RCON_PORT`. O bot precisa alcancar esse endpoint por TCP. `127.0.0.1` so funciona quando a porta RCON do container esta publicada na propria maquina do bot; caso contrario, use o endereco e a porta publicados pelo Pterodactyl. Em `config/servers.json`, `rcon.host` e `rcon.port` substituem o endpoint do `.env`; campos omitidos herdam os valores do `.env`.
+
+Depois de atualizar, rode `/rcon` com `players`. A resposta identifica se falhou na conexao TCP, autenticacao ou execucao do comando. Falha TCP normalmente aponta para IP, porta, publicacao da porta ou firewall. Recusa de autenticacao aponta para uma senha diferente entre o `.env` e a configuracao do servidor.

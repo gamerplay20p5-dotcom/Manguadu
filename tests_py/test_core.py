@@ -37,6 +37,16 @@ def test_server_registry_fallback_and_secret_indirection(tmp_path: Path) -> None
     assert "rcon.host" in describe_missing_rcon(registry.get_default_server())
 
 
+def test_server_registry_uses_env_rcon_endpoint_when_json_fields_are_missing(tmp_path: Path) -> None:
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"servers": [{"id": "pz"}]}), encoding="utf-8")
+
+    server = ServerRegistry({"RCON_HOST": "10.0.0.8", "RCON_PORT": "27016"}, config).get_default_server()
+
+    assert server["rcon"]["host"] == "10.0.0.8"
+    assert server["rcon"]["port"] == 27016
+
+
 def test_invalid_registry_falls_back(tmp_path: Path) -> None:
     config = tmp_path / "servers.json"
     config.write_text("{ invalid", encoding="utf-8")

@@ -71,8 +71,10 @@ class ServerRegistry:
                 "apiKey": self._secret(ptero.get("apiKeyEnv"), "PTERO_API_KEY"),
             },
             "rcon": {
-                "host": clean_text(rcon.get("host")),
-                "port": to_number(rcon.get("port")),
+                # Mantem compatibilidade com instalacoes de servidor unico:
+                # campos ausentes no JSON usam o endpoint antigo do .env.
+                "host": clean_text(rcon.get("host")) or self._env("RCON_HOST"),
+                "port": to_number(rcon.get("port"), to_number(self._env("RCON_PORT"))),
                 "password": self._secret(rcon.get("passwordEnv"), "RCON_PASSWORD"),
             },
             "paths": {"lua": clean_text(paths.get("lua")), "save": clean_text(paths.get("save"))},
