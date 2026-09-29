@@ -130,6 +130,26 @@ def test_decisions_go_to_configured_discord_channel(monkeypatch: pytest.MonkeyPa
     store.close()
 
 
+def test_seed_legacy_guild_settings_imports_valid_channel_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    from manguadu.discord_bot import ManguaduBot
+
+    store = ConfigStore(":memory:")
+    bot = ManguaduBot(store)
+    monkeypatch.setenv("ID_CANAL_ADMIN", "123456")
+    monkeypatch.setenv("ID_CANAL_EVOLUCAO", " 234567 ")
+    monkeypatch.setenv("ID_CANAL_STATS", "invalid")
+    monkeypatch.setenv("ID_CANAL_RANKING", "")
+
+    bot._seed_legacy_guild_settings(11)
+
+    channels = store.get_settings(11)["channels"]
+    assert channels["admin"] == 123456
+    assert channels["evolution"] == 234567
+    assert channels["stats"] is None
+    assert channels["ranking"] is None
+    store.close()
+
+
 def test_discord_views_fit_rows_and_public_buttons_persist() -> None:
     from manguadu.discord_bot import (
         ManguaduBot, PublicTicketView, ReviewView, TicketActionView,

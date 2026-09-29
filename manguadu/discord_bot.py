@@ -35,7 +35,7 @@ from .pz_wipe import build_wipe_plan, execute_wipe_plan, format_wipe_plan
 from .rcon import adduser_command, generate_password, send_rcon_command
 from .server_integrations import describe_server_error, fetch_server_resources, manage_server
 from .server_registry import ServerRegistry, describe_missing_rcon
-from .utils import get_field, to_number
+from .utils import clean_text, get_field, to_number
 from .watchers import FriendHostWatcher
 
 
