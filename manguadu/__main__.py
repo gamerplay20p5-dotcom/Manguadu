@@ -8,8 +8,7 @@ import json
 import logging
 import os
 
-from dotenv import load_dotenv
-
+from .environment import load_project_environment
 from .pz_path_discovery import discover_and_persist_pz_paths
 from .pterodactyl import PterodactylClient, extract_ptero_error
 from .pz_data import PzData
@@ -59,7 +58,7 @@ def main() -> int:
     parser.add_argument("--probe", action="store_true", help="Consulta apenas o estado dos servidores na API do Pterodactyl")
     parser.add_argument("--bot", action="store_true", help="Inicia o bot Discord e seus paineis e tarefas")
     args = parser.parse_args()
-    load_dotenv(override=False)
+    load_project_environment()
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     if args.bot:
         token = os.getenv("DISCORD_TOKEN", "").strip()

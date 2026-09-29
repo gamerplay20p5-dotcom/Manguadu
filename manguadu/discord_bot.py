@@ -893,12 +893,17 @@ class ManguaduBot(discord.Client):
                 output = result.output or "Comando executado sem retorno."
                 await interaction.followup.send("Comando executado via RCON:\n```\n" + output[:1800] + "\n```", ephemeral=True)
                 return
+            rcon_error = result.error
+            if result.stage == "config":
+                missing = describe_missing_rcon(server)
+                if missing:
+                    rcon_error = f"Configuracao do RCON incompleta: {', '.join(missing)}. Confira o .env e config/servers.json."
             async with PterodactylClient(server) as client:
                 fallback = await client.command(comando)
             if fallback["ok"]:
-                await interaction.followup.send("Comando enviado pelo console do Pterodactyl; RCON falhou: " + result.error[:900], ephemeral=True)
+                await interaction.followup.send("Comando enviado pelo console do Pterodactyl; RCON falhou: " + rcon_error[:900], ephemeral=True)
             else:
-                await interaction.followup.send(f"Falha ao executar.\nRCON: {result.error[:700]}\nPterodactyl: {extract_ptero_error(fallback)[:700]}", ephemeral=True)
+                await interaction.followup.send(f"Falha ao executar.\nRCON: {rcon_error[:700]}\nPterodactyl: {extract_ptero_error(fallback)[:700]}", ephemeral=True)
 
         @self.tree.command(name="servidor", description="Gerencia energia e status do servidor PZ")
         @app_commands.describe(acao="Ação desejada")

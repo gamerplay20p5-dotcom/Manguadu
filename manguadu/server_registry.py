@@ -38,8 +38,8 @@ class ServerRegistry:
             "label": self._env("PZ_SERVER_LABEL") or "Servidor",
             "difficulty": self._env("PZ_SERVER_DIFFICULTY"),
             "order": 0,
-            "ptero": {"url": self._env("PTERO_URL"), "serverId": self._env("PTERO_SERVER_ID"), "apiKey": self._env("PTERO_API_KEY")},
-            "rcon": {"host": self._env("RCON_HOST"), "port": to_number(self._env("RCON_PORT")), "password": self._env("RCON_PASSWORD")},
+            "ptero": {"url": self._env("PTERO_URL"), "serverId": self._env("PTERO_SERVER_ID"), "apiKey": self._env("PTERO_API_KEY"), "apiKeyEnv": "PTERO_API_KEY"},
+            "rcon": {"host": self._env("RCON_HOST"), "port": to_number(self._env("RCON_PORT")), "password": self._env("RCON_PASSWORD"), "passwordEnv": "RCON_PASSWORD"},
             "paths": {"lua": self._env("PZ_LUA_PATH"), "save": self._env("PZ_SAVE_ROOT")},
             "connectAddress": self._env("SERVER_CONNECT_ADDRESS"),
             "isDefault": True,
@@ -69,6 +69,7 @@ class ServerRegistry:
                 "url": clean_text(ptero.get("url")) or self._env("PTERO_URL"),
                 "serverId": clean_text(ptero.get("serverId")),
                 "apiKey": self._secret(ptero.get("apiKeyEnv"), "PTERO_API_KEY"),
+                "apiKeyEnv": clean_text(ptero.get("apiKeyEnv")) or "PTERO_API_KEY",
             },
             "rcon": {
                 # Mantem compatibilidade com instalacoes de servidor unico:
@@ -76,6 +77,7 @@ class ServerRegistry:
                 "host": clean_text(rcon.get("host")) or self._env("RCON_HOST"),
                 "port": to_number(rcon.get("port"), to_number(self._env("RCON_PORT"))),
                 "password": self._secret(rcon.get("passwordEnv"), "RCON_PASSWORD"),
+                "passwordEnv": clean_text(rcon.get("passwordEnv")) or "RCON_PASSWORD",
             },
             "paths": {"lua": clean_text(paths.get("lua")), "save": clean_text(paths.get("save"))},
             "connectAddress": clean_text(entry.get("connectAddress")),
@@ -133,11 +135,17 @@ def describe_missing_config(server: dict[str, Any] | None) -> list[str]:
     if server is None:
         return ["servidor desconhecido"]
     ptero = server.get("ptero", {})
-    return [label for key, label in (("url", "ptero.url"), ("serverId", "ptero.serverId"), ("apiKey", "chave da API do Pterodactyl")) if not ptero.get(key)]
+    missing = [label for key, label in (("url", "ptero.url"), ("serverId", "ptero.serverId")) if not ptero.get(key)]
+    if not ptero.get("apiKey"):
+        missing.append(f"chave da API do Pterodactyl ({ptero.get('apiKeyEnv') or 'PTERO_API_KEY'})")
+    return missing
 
 
 def describe_missing_rcon(server: dict[str, Any] | None) -> list[str]:
     if server is None:
         return ["servidor desconhecido"]
     rcon = server.get("rcon", {})
-    return [label for key, label in (("host", "rcon.host"), ("port", "rcon.port"), ("password", "senha do RCON")) if not rcon.get(key)]
+    missing = [label for key, label in (("host", "rcon.host"), ("port", "rcon.port")) if not rcon.get(key)]
+    if not rcon.get("password"):
+        missing.append(f"senha do RCON ({rcon.get('passwordEnv') or 'RCON_PASSWORD'})")
+    return missing
