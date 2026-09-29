@@ -65,7 +65,10 @@ def main() -> int:
         token = os.getenv("DISCORD_TOKEN", "").strip()
         if not token:
             parser.error("DISCORD_TOKEN ausente. Configure o token na VM para iniciar o bot.")
-        asyncio.run(run_bot(token))
+        try:
+            asyncio.run(run_bot(token))
+        except KeyboardInterrupt:
+            logging.info("Encerramento do bot solicitado.")
         return 0
     return asyncio.run(inspect(args.probe))
 
