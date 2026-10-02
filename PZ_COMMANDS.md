@@ -89,6 +89,16 @@ Os comandos dependem dos arquivos FriendHost apontados por `CSV_BASE_PATH`. A lo
 
 As rotinas monitoram aumentos de skills, novas mortes FriendHost e os logs de chat/login/logout. Alertas PZAntiCheat são agrupados e encaminhados ao canal configurado. `WEBHOOK_CHAT` continua opcional para espelhar as mensagens do jogo.
 
+## Fiscalização RP por call de voz
+
+1. Em **Config WL**, selecione o servidor PZ que a fiscalização deverá consultar. O comando usa o RCON configurado para esse servidor.
+2. Para cada conta, vincule o usuário PZ ao membro correto do Discord com `/painel jogadores vincular` usando o nome de login exato do PZ.
+3. Como administrador, execute `/config_kick_automatico`, selecione a call obrigatória e pressione **Ativar / pausar fiscalização**. Antes de ativar, o bot valida RCON, `/players` e os vínculos dos jogadores que já estão online.
+
+Enquanto ativo, o bot consulta `/players` a cada 10 segundos. Se uma conta PZ vinculada ficar fora da call selecionada por 60 segundos, o bot executa `kickuser` com o motivo `É necessário estar na call [nome da call] para poder permanecer no servidor.` e registra o kick no canal administrativo configurado. Jogadores novos também precisam estar vinculados antes de entrar; sem vínculo, são considerados fora da call. Pause a fiscalização no mesmo painel para interrompê-la.
+
+Se RCON estiver indisponível, a resposta de `/players` estiver incompleta ou a call configurada não puder ser encontrada, o ciclo não aplica kicks e o bot reinicia a contagem de tolerância. A resposta `/players` precisa incluir a lista de nomes; uma contagem sem nomes não é suficiente para autorizar expulsões.
+
 ## Tickets, WL e Gemini
 
 - `/config_bot` abre a configuração de tickets e da WL. Escolha a categoria e o canal do painel de tickets, depois publique o painel pela interface.

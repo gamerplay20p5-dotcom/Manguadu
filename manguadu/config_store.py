@@ -40,6 +40,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_approve": False,
         "server_id": "default",
     },
+    "kick_automatico": {
+        "enabled": False,
+        "voice_channel_id": None,
+    },
 }
 
 
@@ -49,6 +53,7 @@ def _merged_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         return config
     config["channels"].update(raw.get("channels") if isinstance(raw.get("channels"), dict) else {})
     config["wl"].update(raw.get("wl") if isinstance(raw.get("wl"), dict) else {})
+    config["kick_automatico"].update(raw.get("kick_automatico") if isinstance(raw.get("kick_automatico"), dict) else {})
     for key in ("ticket_category_id", "admin_role_id", "ticket_panel_message_id", "stats_panel_message_id", "ranking_panel_message_id"):
         if key in raw:
             config[key] = raw[key]
@@ -228,7 +233,7 @@ class ConfigStore:
         return normalized
 
     def set_value(self, guild_id: int, section: str, key: str, value: Any) -> dict[str, Any]:
-        if section not in ("channels", "wl") or key not in DEFAULT_SETTINGS[section]:
+        if section not in ("channels", "wl", "kick_automatico") or key not in DEFAULT_SETTINGS[section]:
             raise ValueError("Campo de configuracao desconhecido")
         with self._lock:
             config = self.get_settings(guild_id)
