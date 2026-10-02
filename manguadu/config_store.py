@@ -320,6 +320,21 @@ class ConfigStore:
                 request["triage"] = {}
             return request
 
+    def get_latest_request_by_username(self, guild_id: int, username: str) -> dict[str, Any] | None:
+        wanted = username.strip().casefold()
+        if not wanted:
+            return None
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT channel_id, username FROM wl_requests WHERE guild_id = ? ORDER BY updated_at DESC, rowid DESC",
+                (guild_id,),
+            ).fetchall()
+            channel_id = next(
+                (int(row["channel_id"]) for row in rows if str(row["username"]).strip().casefold() == wanted),
+                None,
+            )
+        return self.get_request(channel_id) if channel_id is not None else None
+
     def save_request(self, channel_id: int, guild_id: int, user_id: int, username: str, character_name: str, lore: str, score: float, status: str, password_ciphertext: str = "", triage: dict[str, Any] | None = None) -> None:
         if len(lore) > MAX_LORE_CHARS:
             raise ValueError(f"A lore de personagem pode ter no maximo {MAX_LORE_CHARS:,} caracteres.")

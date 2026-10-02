@@ -48,7 +48,7 @@ python -m manguadu --bot       # inicia o bot Discord
 
 ## Primeira configuração no Discord
 
-1. Convide o bot com permissões para ver canais, enviar mensagens, gerenciar canais e usar comandos de aplicação. Habilite os intents necessários no Developer Portal se a configuração do aplicativo exigir.
+1. Convide o bot com permissões para ver canais, enviar mensagens, anexar arquivos no canal de auditoria, gerenciar canais e usar comandos de aplicação. Habilite os intents necessários no Developer Portal se a configuração do aplicativo exigir.
 2. Execute `/config_bot` como administrador e escolha canais, categoria de tickets, cargo da equipe e opções da WL.
 3. Em **Config WL**, escolha o servidor, defina se a lore é obrigatória e selecione revisão manual ou automática. Para lore acima de 4.000 caracteres, use `/config_lore` com um arquivo `.txt` UTF-8 em um canal privado da equipe.
 4. Use `/config_api`, abra o Google AI Studio pelo botão do painel, crie uma chave, cole-a no modal privado e teste a conexão. A camada gratuita pode usar prompts para melhorar produtos Google; o painel informa isso antes da configuração.
@@ -59,7 +59,7 @@ python -m manguadu --bot       # inicia o bot Discord
 ### Canais da WL
 
 - **Canal de decisões:** recebe aprovações e reprovações, incluindo o motivo. Esse aviso fica no Discord, fora do chat dentro do Project Zomboid.
-- **Canal de auditoria:** recebe a lore analisada e o resumo da triagem; no modo automático, registra os motivos de aceitação ou recusa.
+- **Canal de auditoria:** recebe a lore analisada e o resumo da triagem; toda WL aprovada também anexa a lore completa em `.txt`. Administradores podem recuperar a lore mais recente de um usuário PZ com `/wl puxar_lore jogador:<nome PZ>`.
 - **Ticket privado:** mantém a conversa entre quem abriu o pedido e a equipe autorizada. A senha gerada ou informada é entregue por DM; se a DM estiver fechada, o bot usa o canal privado.
 
 ## Configuração e dados

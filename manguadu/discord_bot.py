@@ -126,6 +126,35 @@ async def _read_lore_attachment(attachment: discord.Attachment) -> tuple[str | N
     return content, None
 
 
+def _make_lore_files(lore: str, username: str, max_file_bytes: int) -> list[discord.File]:
+    """Build UTF-8 text attachments, splitting only when Discord's file limit requires it."""
+    payload = lore.encode("utf-8")
+    if not payload:
+        return []
+    limit = max(1, int(max_file_bytes))
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < len(payload):
+        end = min(offset + limit, len(payload))
+        if end < len(payload):
+            while end > offset and payload[end] & 0xC0 == 0x80:
+                end -= 1
+        if end <= offset:
+            raise ValueError("O limite de anexo do Discord e pequeno demais para exportar esta lore.")
+        chunks.append(payload[offset:end])
+        offset = end
+        if len(chunks) > 10:
+            raise ValueError("A lore excede o limite de anexos deste servidor Discord; aumente o limite de upload ou reduza o arquivo.")
+
+    safe_username = re.sub(r"[^A-Za-z0-9._-]+", "_", clean_text(username)).strip("._-")[:80] or "jogador"
+    total = len(chunks)
+    files: list[discord.File] = []
+    for index, chunk in enumerate(chunks, start=1):
+        suffix = f"-parte-{index:02d}-de-{total:02d}" if total > 1 else ""
+        files.append(discord.File(io.BytesIO(chunk), filename=f"lore-{safe_username}{suffix}.txt"))
+    return files
+
+
 def _configured_text_channel(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:
     channel = guild.get_channel(channel_id) if channel_id else None
     return channel if isinstance(channel, discord.TextChannel) else None
@@ -810,6 +839,54 @@ class ManguaduBot(discord.Client):
                 view=LoreUploadDraftView(self, ticket, content),
                 ephemeral=True,
             )
+
+        @wl_group.command(name="puxar_lore", description="Baixa a lore mais recente enviada por um jogador PZ")
+        @app_commands.describe(jogador="Nome exato do usuário PZ informado na WL")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def wl_pull_lore(interaction: discord.Interaction, jogador: str) -> None:
+            if not await _admin_guard(interaction, self.store):
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            request = await asyncio.to_thread(
+                self.store.get_latest_request_by_username,
+                interaction.guild.id,
+                jogador,
+            )
+            if not request:
+                await interaction.followup.send(f"Não encontrei uma WL para o usuário PZ `{discord.utils.escape_markdown(jogador)}` neste servidor.", ephemeral=True)
+                return
+            lore = request.get("lore", "")
+            if not lore:
+                await interaction.followup.send("Esse pedido não contém uma lore para baixar.", ephemeral=True)
+                return
+            try:
+                files = await asyncio.to_thread(_make_lore_files, lore, request["username"], interaction.guild.filesize_limit)
+            except ValueError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            status = clean_text(request.get("status", "desconhecido"))
+            message = (
+                f"Lore mais recente de `{discord.utils.escape_markdown(request['username'])}` "
+                f"(pedido: **{discord.utils.escape_markdown(status)}**)."
+            )
+            try:
+                for index, file in enumerate(files, start=1):
+                    content = message if index == 1 else f"Continuação da lore: parte {index} de {len(files)}."
+                    await interaction.followup.send(
+                        content=content,
+                        file=file,
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            except discord.HTTPException:
+                for file in files:
+                    file.close()
+                logger.exception("Falha ao entregar a lore de %s pela interacao WL", request["username"])
+                await interaction.followup.send(
+                    "O Discord recusou o anexo. Confira o limite de upload deste servidor e tente novamente.",
+                    ephemeral=True,
+                )
 
         self.tree.add_command(wl_group)
 
@@ -2413,10 +2490,50 @@ class ManguaduBot(discord.Client):
                 embed.add_field(name="Contradições apontadas", value="\n".join(result.contradictions)[:900], inline=False)
         embed.add_field(name="Resumo da lore enviada", value=(request["lore"][:900] + "…") if len(request["lore"]) > 900 else request["lore"] or "Não informada", inline=False)
         embed.add_field(name="Ticket", value=f"<#{request['channel_id']}>")
+        lore_files: list[discord.File] = []
+        lore = request.get("lore", "")
+        if request.get("status") == "approved" and lore:
+            try:
+                lore_files = await asyncio.to_thread(
+                    _make_lore_files,
+                    lore,
+                    request["username"],
+                    getattr(guild, "filesize_limit", MAX_LORE_UPLOAD_BYTES),
+                )
+            except ValueError as exc:
+                embed.add_field(name="Arquivo da lore", value=f"Não foi possível anexar automaticamente: {exc}", inline=False)
+        elif request.get("status") == "approved":
+            embed.add_field(name="Arquivo da lore", value="Este pedido foi aprovado sem envio de uma lore.", inline=False)
+        audit_sent = False
         try:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            if lore_files:
+                await channel.send(embed=embed, file=lore_files[0], allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            audit_sent = True
+            for index, file in enumerate(lore_files[1:], start=2):
+                await channel.send(
+                    content=f"Continuação da lore de `{discord.utils.escape_markdown(request['username'])}`: parte {index} de {len(lore_files)}.",
+                    file=file,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except discord.HTTPException:
             logger.exception("Falha ao registrar auditoria de WL na guild %s", guild.id)
+            for file in lore_files:
+                file.close()
+            if lore_files:
+                note = "O Discord recusou um dos anexos da lore. Use `/wl puxar_lore` para tentar baixar o arquivo novamente."
+                if audit_sent:
+                    try:
+                        await channel.send(note, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        logger.exception("Falha ao informar erro no anexo de auditoria da WL na guild %s", guild.id)
+                else:
+                    embed.add_field(name="Arquivo da lore", value=note, inline=False)
+                    try:
+                        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        logger.exception("Falha ao publicar auditoria de WL sem o arquivo na guild %s", guild.id)
 
     async def post_review(self, channel: discord.TextChannel, ticket: dict[str, Any], username: str, character: str, lore: str, result: Any) -> None:
         embed = discord.Embed(title="📋 Pedido de whitelist", color=0xE8B44B if result and not result.approved else 0x28D17C)
