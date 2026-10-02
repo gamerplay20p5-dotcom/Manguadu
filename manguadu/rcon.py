@@ -10,6 +10,12 @@ from dataclasses import dataclass
 
 
 MAX_PACKET_SIZE = 4 * 1024 * 1024
+MULTIPART_DRAIN_TIMEOUT = 0.35
+SERVERDATA_AUTH = 3
+SERVERDATA_EXECCOMMAND = 2
+SERVERDATA_RESPONSE_VALUE = 0
+SERVERDATA_AUTH_RESPONSE = 2
+MULTIPART_SENTINEL = b"\x00\x01\x00\x00"
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,7 @@ class RconResult:
     ok: bool
     output: str = ""
     error: str = ""
+    stage: str = ""
 
 
 def _packet(request_id: int, packet_type: int, body: str) -> bytes:
@@ -24,46 +31,135 @@ def _packet(request_id: int, packet_type: int, body: str) -> bytes:
     return struct.pack("<i", len(content)) + content
 
 
-async def _read_packet(reader: asyncio.StreamReader, timeout: float) -> tuple[int, int, str]:
+async def _read_packet(reader: asyncio.StreamReader, timeout: float) -> tuple[int, int, bytes]:
     length = struct.unpack("<i", await asyncio.wait_for(reader.readexactly(4), timeout))[0]
     if length < 10 or length > MAX_PACKET_SIZE:
-        raise ValueError("Pacote RCON de tamanho invalido")
+        raise ValueError(f"pacote com tamanho invalido ({length} bytes)")
     payload = await asyncio.wait_for(reader.readexactly(length), timeout)
     request_id, packet_type = struct.unpack("<ii", payload[:8])
     if not payload.endswith(b"\0\0"):
-        raise ValueError("Pacote RCON sem terminador")
-    return request_id, packet_type, payload[8:-2].decode("utf-8", errors="replace")
+        raise ValueError("pacote sem terminador")
+    return request_id, packet_type, payload[8:-2]
+
+
+async def _read_command_output(
+    reader: asyncio.StreamReader,
+    command_id: int,
+    timeout: float,
+) -> str:
+    """Leia todas as partes da resposta, aceitando tambem servidores sem sentinel."""
+    chunks: list[bytes] = []
+    total = 0
+    first_packet = True
+    while True:
+        try:
+            packet_id, packet_type, body = await _read_packet(
+                reader,
+                timeout if first_packet else min(timeout, MULTIPART_DRAIN_TIMEOUT),
+            )
+        except TimeoutError:
+            if chunks or not first_packet:
+                break
+            raise
+        except asyncio.IncompleteReadError:
+            # Alguns servidores fecham o socket apos uma resposta unica, sem
+            # mandar o pacote sentinel usado para respostas multipart.
+            if chunks or not first_packet:
+                break
+            raise
+        first_packet = False
+        if packet_type != SERVERDATA_RESPONSE_VALUE:
+            raise ValueError(f"tipo de resposta inesperado ({packet_type})")
+        if packet_id != command_id:
+            raise ValueError(f"id de resposta inesperado ({packet_id})")
+        if body == MULTIPART_SENTINEL or not body:
+            break
+        total += len(body)
+        if total > MAX_PACKET_SIZE:
+            raise ValueError("resposta excedeu o limite de 4 MiB")
+        chunks.append(body)
+    return b"".join(chunks).decode("utf-8", errors="replace").strip()
 
 
 async def send_rcon_command(host: str, port: int, password: str, command: str, timeout: float = 10) -> RconResult:
-    if not host or not port or not password:
-        return RconResult(False, error="Configuracao do RCON incompleta.")
-    writer = None
+    host = str(host or "").strip()
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not 1 <= port <= 65535 or not password:
+        return RconResult(
+            False,
+            error="Configuracao incompleta: informe host, porta TCP (1 a 65535) e senha RCON.",
+            stage="config",
+        )
+
+    endpoint = f"{host}:{port}"
+    writer: asyncio.StreamWriter | None = None
+    stage = "conexao TCP"
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+
+        stage = "autenticacao"
         auth_id = secrets.randbelow(2**30) + 1
-        writer.write(_packet(auth_id, 3, password))
+        writer.write(_packet(auth_id, SERVERDATA_AUTH, password))
         await asyncio.wait_for(writer.drain(), timeout)
-        # Alguns servidores enviam RESPONSE_VALUE antes de AUTH_RESPONSE.
-        for _ in range(3):
+
+        # Alguns servidores Source enviam um RESPONSE_VALUE vazio antes da
+        # confirmacao de autenticacao.
+        for _ in range(4):
             packet_id, packet_type, _ = await _read_packet(reader, timeout)
-            if packet_type == 2:
+            if packet_type == SERVERDATA_AUTH_RESPONSE:
                 if packet_id == -1:
-                    return RconResult(False, error="Senha RCON recusada.")
+                    return RconResult(
+                        False,
+                        error=f"Senha RCON recusada por {endpoint}. Confira RCON_PASSWORD e RCONPassword no servidor PZ.",
+                        stage=stage,
+                    )
                 if packet_id != auth_id:
-                    return RconResult(False, error="Resposta de autenticacao RCON invalida.")
+                    return RconResult(
+                        False,
+                        error=f"Resposta de autenticacao invalida recebida de {endpoint}.",
+                        stage=stage,
+                    )
                 break
+            if packet_type != SERVERDATA_RESPONSE_VALUE:
+                return RconResult(
+                    False,
+                    error=f"Resposta inesperada durante autenticacao em {endpoint} (tipo {packet_type}).",
+                    stage=stage,
+                )
         else:
-            return RconResult(False, error="RCON nao confirmou a autenticacao.")
-        command_id = auth_id + 1
-        writer.write(_packet(command_id, 2, command))
+            return RconResult(
+                False,
+                error=f"{endpoint} nao confirmou a autenticacao RCON.",
+                stage=stage,
+            )
+
+        stage = "comando"
+        command_id = (auth_id + 1) % (2**30) or 1
+        # O segundo pacote vazio e parte do protocolo Source: permite ao
+        # servidor delimitar respostas divididas em varios pacotes.
+        writer.write(
+            _packet(command_id, SERVERDATA_EXECCOMMAND, command)
+            + _packet(command_id, SERVERDATA_RESPONSE_VALUE, "")
+        )
         await asyncio.wait_for(writer.drain(), timeout)
-        response_id, _, output = await _read_packet(reader, timeout)
-        if response_id != command_id:
-            return RconResult(False, error="Resposta RCON nao corresponde ao comando.")
-        return RconResult(True, output=output.strip())
-    except (OSError, TimeoutError, asyncio.IncompleteReadError, ValueError) as exc:
-        return RconResult(False, error=f"Falha de comunicacao RCON: {exc}")
+        output = await _read_command_output(reader, command_id, timeout)
+        return RconResult(True, output=output, stage=stage)
+    except TimeoutError:
+        return RconResult(
+            False,
+            error=f"Tempo esgotado durante {stage} em {endpoint}. Verifique se a porta RCON TCP esta acessivel e se o servidor respondeu.",
+            stage=stage,
+        )
+    except (OSError, asyncio.IncompleteReadError, ValueError) as exc:
+        detail = str(exc) or exc.__class__.__name__
+        return RconResult(
+            False,
+            error=f"Falha na etapa de {stage} em {endpoint}: {detail}",
+            stage=stage,
+        )
     finally:
         if writer is not None:
             writer.close()

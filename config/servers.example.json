@@ -7,6 +7,8 @@
     "variavel de ambiente onde o valor esta. Assim este arquivo pode ir para o",
     "git sem vazar chave nem senha.",
     "",
+    "RCON host deve ser acessivel da VM; 127.0.0.1 exige a porta publicada localmente.",
+    "",
     "order define a ordem de dureza e e usada para saber se a migracao esta",
     "subindo (facil -> hard) ou descendo."
   ],

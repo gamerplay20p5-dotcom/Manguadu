@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
+from manguadu.environment import load_project_environment
 from manguadu.friendhost import is_friendhost_data_file, resolve_player_file, resolve_server_file
 from manguadu.pz_data import PzData
 from manguadu.server_registry import ServerRegistry, describe_missing_config, describe_missing_rcon
 from manguadu.utils import read_csv_rows, read_latest_csv_row
+
+
+def test_project_env_overrides_stale_pm2_values_without_erasing_external_values(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("RCON_PASSWORD=from-file\nPTERO_API_KEY=from-file\nPTERO_URL=\n", encoding="utf-8")
+    monkeypatch.setenv("RCON_PASSWORD", "")
+    monkeypatch.setenv("PTERO_API_KEY", "stale-pm2-value")
+    monkeypatch.setenv("PTERO_URL", "https://runtime.test")
+
+    load_project_environment(env_file)
+
+    assert os.environ["RCON_PASSWORD"] == "from-file"
+    assert os.environ["PTERO_API_KEY"] == "from-file"
+    assert os.environ["PTERO_URL"] == "https://runtime.test"
 
 
 def test_server_registry_fallback_and_secret_indirection(tmp_path: Path) -> None:
@@ -35,6 +51,30 @@ def test_server_registry_fallback_and_secret_indirection(tmp_path: Path) -> None
     assert "facil-secret" not in config.read_text(encoding="utf-8")
     assert describe_missing_config(registry.get_default_server()) == []
     assert "rcon.host" in describe_missing_rcon(registry.get_default_server())
+
+
+def test_server_registry_uses_env_rcon_endpoint_when_json_fields_are_missing(tmp_path: Path) -> None:
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"servers": [{"id": "pz"}]}), encoding="utf-8")
+
+    server = ServerRegistry({"RCON_HOST": "10.0.0.8", "RCON_PORT": "27016"}, config).get_default_server()
+
+    assert server["rcon"]["host"] == "10.0.0.8"
+    assert server["rcon"]["port"] == 27016
+
+
+def test_registry_reports_names_of_missing_secret_variables(tmp_path: Path) -> None:
+    config = tmp_path / "servers.json"
+    config.write_text(json.dumps({"servers": [{
+        "id": "pz",
+        "ptero": {"serverId": "short-id", "apiKeyEnv": "PTERO_API_PZ"},
+        "rcon": {"passwordEnv": "RCON_PASSWORD_PZ"},
+    }]}), encoding="utf-8")
+
+    server = ServerRegistry({"PTERO_URL": "https://panel.test", "RCON_HOST": "127.0.0.1", "RCON_PORT": "27015"}, config).get_default_server()
+
+    assert describe_missing_config(server) == ["chave da API do Pterodactyl (PTERO_API_PZ)"]
+    assert describe_missing_rcon(server) == ["senha do RCON (RCON_PASSWORD_PZ)"]
 
 
 def test_invalid_registry_falls_back(tmp_path: Path) -> None:

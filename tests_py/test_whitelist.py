@@ -64,7 +64,7 @@ def test_adduser_rejects_console_injection_and_generated_password() -> None:
         adduser_command("Jogador", 'senha" stop')
 
 
-def test_rcon_auth_and_adduser_command() -> None:
+def test_rcon_auth_and_multipart_adduser_response() -> None:
     async def scenario() -> None:
         commands = []
 
@@ -81,7 +81,15 @@ def test_rcon_auth_and_adduser_command() -> None:
                 command_id, packet_type = struct.unpack("<ii", payload[:8])
                 assert packet_type == 2
                 commands.append(payload[8:-2].decode())
-                writer.write(_packet(command_id, 0, "User added"))
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                payload = await reader.readexactly(size)
+                delimiter_id, delimiter_type = struct.unpack("<ii", payload[:8])
+                assert delimiter_id == command_id and delimiter_type == 0 and payload[8:-2] == b""
+                writer.write(
+                    _packet(command_id, 0, "User ")
+                    + _packet(command_id, 0, "added")
+                    + _packet(command_id, 0, "\x00\x01\x00\x00")
+                )
                 await writer.drain()
             finally:
                 writer.close()
@@ -96,6 +104,70 @@ def test_rcon_auth_and_adduser_command() -> None:
             await server.wait_closed()
         assert result.ok and result.output == "User added"
         assert commands == ['adduser "Jogador" "Senha123456"']
+
+    asyncio.run(scenario())
+
+
+def test_rcon_reports_password_rejection_without_exposing_secret() -> None:
+    async def scenario() -> None:
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                payload = await reader.readexactly(size)
+                auth_id, _ = struct.unpack("<ii", payload[:8])
+                writer.write(_packet(-1, 2, ""))
+                await writer.drain()
+                assert auth_id != -1
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            result = await send_rcon_command("127.0.0.1", port, "dont-print-this", "players")
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert not result.ok
+        assert result.stage == "autenticacao"
+        assert "Senha RCON recusada" in result.error
+        assert "dont-print-this" not in result.error
+
+    asyncio.run(scenario())
+
+
+def test_rcon_accepts_single_response_when_server_closes_without_sentinel() -> None:
+    async def scenario() -> None:
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                auth_payload = await reader.readexactly(size)
+                auth_id, _ = struct.unpack("<ii", auth_payload[:8])
+                writer.write(_packet(auth_id, 2, ""))
+                await writer.drain()
+
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                command_payload = await reader.readexactly(size)
+                command_id, _ = struct.unpack("<ii", command_payload[:8])
+                size = struct.unpack("<i", await reader.readexactly(4))[0]
+                await reader.readexactly(size)  # pacote vazio de delimitacao
+                writer.write(_packet(command_id, 0, "Players connected: 1"))
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            result = await send_rcon_command("127.0.0.1", port, "secret", "players")
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert result.ok
+        assert result.output == "Players connected: 1"
 
     asyncio.run(scenario())
 

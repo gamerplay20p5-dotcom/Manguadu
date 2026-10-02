@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import zlib
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 from typing import Any
+
+from cryptography.fernet import Fernet, InvalidToken
+
+from .lore import MAX_LORE_CHARS
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "bot-config.sqlite3"
@@ -53,6 +60,9 @@ class ConfigStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._lore_cache: OrderedDict[int, str] = OrderedDict()
+        self._request_lore_cache: OrderedDict[int, str] = OrderedDict()
+        self._fernet = self._load_secret_cipher()
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys = ON")
@@ -61,6 +71,14 @@ class ConfigStore:
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS guild_lore (
+                guild_id INTEGER PRIMARY KEY,
+                content_z BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS gemini_credentials (
+                guild_id INTEGER PRIMARY KEY,
+                api_key_ciphertext TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS tickets (
                 channel_id INTEGER PRIMARY KEY,
@@ -78,9 +96,11 @@ class ConfigStore:
                 username TEXT NOT NULL,
                 character_name TEXT NOT NULL,
                 lore TEXT NOT NULL,
+                lore_compressed BLOB,
                 password_ciphertext TEXT NOT NULL DEFAULT '',
                 score REAL NOT NULL,
                 status TEXT NOT NULL,
+                triage_json TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS whitelist (
@@ -95,7 +115,60 @@ class ConfigStore:
         columns = {row["name"] for row in self._db.execute("PRAGMA table_info(wl_requests)")}
         if "password_ciphertext" not in columns:
             self._db.execute("ALTER TABLE wl_requests ADD COLUMN password_ciphertext TEXT NOT NULL DEFAULT ''")
+        if "lore_compressed" not in columns:
+            self._db.execute("ALTER TABLE wl_requests ADD COLUMN lore_compressed BLOB")
+        if "triage_json" not in columns:
+            self._db.execute("ALTER TABLE wl_requests ADD COLUMN triage_json TEXT NOT NULL DEFAULT ''")
+        self._migrate_legacy_lore()
         self._db.commit()
+
+    def _load_secret_cipher(self) -> Fernet:
+        if str(self.path) == ":memory:":
+            return Fernet(Fernet.generate_key())
+        key_path = self.path.with_name(self.path.name + ".key")
+        try:
+            key = key_path.read_bytes().strip()
+        except FileNotFoundError:
+            key = Fernet.generate_key()
+            try:
+                descriptor = os.open(key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                key = key_path.read_bytes().strip()
+            else:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(key)
+        try:
+            cipher = Fernet(key)
+        except ValueError as exc:
+            raise RuntimeError(f"Chave local invalida em {key_path}; restaure o backup junto com o banco SQLite.") from exc
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        return cipher
+
+    def _migrate_legacy_lore(self) -> None:
+        for row in self._db.execute("SELECT guild_id, payload FROM guild_settings").fetchall():
+            try:
+                payload = json.loads(row["payload"])
+                reference = payload.get("wl", {}).get("lore_reference", "")
+            except (AttributeError, json.JSONDecodeError):
+                continue
+            if not isinstance(reference, str) or not reference:
+                continue
+            self._db.execute(
+                "INSERT OR IGNORE INTO guild_lore(guild_id, content_z) VALUES (?, ?)",
+                (row["guild_id"], zlib.compress(reference.encode("utf-8"), level=6)),
+            )
+            payload.setdefault("wl", {})["lore_reference"] = ""
+            self._db.execute("UPDATE guild_settings SET payload = ? WHERE guild_id = ?", (json.dumps(payload, ensure_ascii=False), row["guild_id"]))
+        for row in self._db.execute("SELECT channel_id, lore FROM wl_requests WHERE lore_compressed IS NULL AND lore != ''").fetchall():
+            encoded = row["lore"].encode("utf-8")
+            if len(encoded) > 4096:
+                self._db.execute(
+                    "UPDATE wl_requests SET lore = '', lore_compressed = ? WHERE channel_id = ?",
+                    (zlib.compress(encoded, level=6), row["channel_id"]),
+                )
 
     def close(self) -> None:
         self._db.close()
@@ -103,12 +176,55 @@ class ConfigStore:
     def get_settings(self, guild_id: int) -> dict[str, Any]:
         with self._lock:
             row = self._db.execute("SELECT payload FROM guild_settings WHERE guild_id = ?", (guild_id,)).fetchone()
-            return _merged_settings(json.loads(row["payload"]) if row else None)
+            config = _merged_settings(json.loads(row["payload"]) if row else None)
+            config["wl"]["lore_reference"] = self._get_guild_lore(guild_id)
+            return config
+
+    def _get_guild_lore(self, guild_id: int) -> str:
+        if guild_id in self._lore_cache:
+            self._lore_cache.move_to_end(guild_id)
+            return self._lore_cache[guild_id]
+        row = self._db.execute("SELECT content_z FROM guild_lore WHERE guild_id = ?", (guild_id,)).fetchone()
+        try:
+            reference = zlib.decompress(row["content_z"]).decode("utf-8") if row else ""
+        except (zlib.error, UnicodeDecodeError):
+            reference = ""
+        self._remember_lore(self._lore_cache, guild_id, reference)
+        return reference
+
+    @staticmethod
+    def _remember_lore(cache: OrderedDict[int, str], key: int, value: str) -> None:
+        """Keep decoded lore in a small LRU cache bounded by characters."""
+        cache.pop(key, None)
+        cache[key] = value
+        total_chars = sum(map(len, cache.values()))
+        while (total_chars > MAX_LORE_CHARS or len(cache) > 8) and len(cache) > 1:
+            _old_key, old_value = cache.popitem(last=False)
+            total_chars -= len(old_value)
+
+    def _save_guild_lore(self, guild_id: int, reference: str) -> None:
+        if len(reference) > MAX_LORE_CHARS:
+            raise ValueError(f"A lore base pode ter no maximo {MAX_LORE_CHARS:,} caracteres.")
+        current = self._get_guild_lore(guild_id)
+        if current == reference:
+            return
+        if reference:
+            content_z = zlib.compress(reference.encode("utf-8"), level=6)
+            self._db.execute(
+                "INSERT INTO guild_lore(guild_id, content_z) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET content_z=excluded.content_z",
+                (guild_id, content_z),
+            )
+        else:
+            self._db.execute("DELETE FROM guild_lore WHERE guild_id = ?", (guild_id,))
+        self._remember_lore(self._lore_cache, guild_id, reference)
 
     def save_settings(self, guild_id: int, config: dict[str, Any]) -> dict[str, Any]:
         normalized = _merged_settings(config)
         with self._lock, self._db:
-            self._db.execute("INSERT INTO guild_settings(guild_id, payload) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET payload=excluded.payload", (guild_id, json.dumps(normalized, ensure_ascii=False)))
+            self._save_guild_lore(guild_id, normalized["wl"]["lore_reference"])
+            stored = deepcopy(normalized)
+            stored["wl"]["lore_reference"] = ""
+            self._db.execute("INSERT INTO guild_settings(guild_id, payload) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET payload=excluded.payload", (guild_id, json.dumps(stored, ensure_ascii=False)))
         return normalized
 
     def set_value(self, guild_id: int, section: str, key: str, value: Any) -> dict[str, Any]:
@@ -118,6 +234,35 @@ class ConfigStore:
             config = self.get_settings(guild_id)
             config[section][key] = value
             return self.save_settings(guild_id, config)
+
+    def has_gemini_api_key(self, guild_id: int) -> bool:
+        with self._lock:
+            return self._db.execute("SELECT 1 FROM gemini_credentials WHERE guild_id = ?", (guild_id,)).fetchone() is not None
+
+    def get_gemini_api_key(self, guild_id: int) -> str:
+        with self._lock:
+            row = self._db.execute("SELECT api_key_ciphertext FROM gemini_credentials WHERE guild_id = ?", (guild_id,)).fetchone()
+        if not row:
+            return ""
+        try:
+            return self._fernet.decrypt(row["api_key_ciphertext"].encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError) as exc:
+            raise ValueError("A chave Gemini armazenada nao pode ser descriptografada; restaure o arquivo .key do bot-config.") from exc
+
+    def set_gemini_api_key(self, guild_id: int, api_key: str) -> None:
+        cleaned = api_key.strip()
+        if not cleaned or len(cleaned) > 256:
+            raise ValueError("A chave Gemini esta vazia ou excede o tamanho permitido.")
+        ciphertext = self._fernet.encrypt(cleaned.encode("utf-8")).decode("ascii")
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO gemini_credentials(guild_id, api_key_ciphertext) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET api_key_ciphertext=excluded.api_key_ciphertext",
+                (guild_id, ciphertext),
+            )
+
+    def clear_gemini_api_key(self, guild_id: int) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM gemini_credentials WHERE guild_id = ?", (guild_id,))
 
     def set_top_value(self, guild_id: int, key: str, value: Any) -> dict[str, Any]:
         if key not in ("ticket_category_id", "admin_role_id", "ticket_panel_message_id", "stats_panel_message_id", "ranking_panel_message_id"):
@@ -148,18 +293,46 @@ class ConfigStore:
     def get_request(self, channel_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute("SELECT * FROM wl_requests WHERE channel_id = ?", (channel_id,)).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            request = dict(row)
+            compressed = request.pop("lore_compressed", None)
+            if compressed:
+                if channel_id in self._request_lore_cache:
+                    self._request_lore_cache.move_to_end(channel_id)
+                else:
+                    try:
+                        lore = zlib.decompress(compressed).decode("utf-8")
+                    except (zlib.error, UnicodeDecodeError):
+                        lore = ""
+                    self._remember_lore(self._request_lore_cache, channel_id, lore)
+                request["lore"] = self._request_lore_cache[channel_id]
+            else:
+                self._remember_lore(self._request_lore_cache, channel_id, request.get("lore", ""))
+            try:
+                request["triage"] = json.loads(request.pop("triage_json", "") or "{}")
+            except json.JSONDecodeError:
+                request["triage"] = {}
+            return request
 
-    def save_request(self, channel_id: int, guild_id: int, user_id: int, username: str, character_name: str, lore: str, score: float, status: str, password_ciphertext: str = "") -> None:
+    def save_request(self, channel_id: int, guild_id: int, user_id: int, username: str, character_name: str, lore: str, score: float, status: str, password_ciphertext: str = "", triage: dict[str, Any] | None = None) -> None:
+        if len(lore) > MAX_LORE_CHARS:
+            raise ValueError(f"A lore de personagem pode ter no maximo {MAX_LORE_CHARS:,} caracteres.")
+        encoded = lore.encode("utf-8")
+        compressed = zlib.compress(encoded, level=6) if len(encoded) > 4096 else None
+        stored_lore = "" if compressed is not None else lore
         with self._lock, self._db:
-            self._db.execute("""INSERT INTO wl_requests(channel_id, guild_id, user_id, username, character_name, lore, password_ciphertext, score, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            self._db.execute("""INSERT INTO wl_requests(channel_id, guild_id, user_id, username, character_name, lore, lore_compressed, password_ciphertext, score, status, triage_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(channel_id) DO UPDATE SET username=excluded.username,
                     character_name=excluded.character_name, lore=excluded.lore,
+                    lore_compressed=excluded.lore_compressed,
                     password_ciphertext=excluded.password_ciphertext,
                     score=excluded.score, status=excluded.status,
+                    triage_json=excluded.triage_json,
                     updated_at=CURRENT_TIMESTAMP""",
-                (channel_id, guild_id, user_id, username, character_name, lore, password_ciphertext, score, status))
+                (channel_id, guild_id, user_id, username, character_name, stored_lore, compressed, password_ciphertext, score, status, json.dumps(triage or {}, ensure_ascii=False)))
+            self._remember_lore(self._request_lore_cache, channel_id, lore)
 
     def set_request_status(self, channel_id: int, status: str) -> None:
         with self._lock, self._db:
