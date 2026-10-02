@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+import heapq
 
 
 STOPWORDS = frozenset("""a ao aos as o os um uma uns umas de da do das dos e em na no nas nos
@@ -26,9 +27,97 @@ class LoreResult:
     score: float
     common_terms: tuple[str, ...]
     reason: str
+    summary: str = ""
+    contradictions: tuple[str, ...] = ()
+    source: str = "local"
+    decision: str = ""
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "approved": self.approved,
+            "score": self.score,
+            "common_terms": list(self.common_terms),
+            "reason": self.reason,
+            "summary": self.summary,
+            "contradictions": list(self.contradictions),
+            "source": self.source,
+            "decision": self.decision,
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> "LoreResult | None":
+        if not isinstance(value, dict):
+            return None
+        try:
+            return cls(
+                approved=bool(value["approved"]),
+                score=max(0.0, min(1.0, float(value["score"]))),
+                common_terms=tuple(str(item)[:240] for item in value.get("common_terms", []) if str(item).strip())[:12],
+                reason=str(value.get("reason", ""))[:1200],
+                summary=str(value.get("summary", ""))[:900],
+                contradictions=tuple(str(item)[:240] for item in value.get("contradictions", []) if str(item).strip())[:8],
+                source=str(value.get("source", "local"))[:40],
+                decision=str(value.get("decision", ""))[:20],
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+MAX_LORE_CHARS = 9_999_999
+LORE_CONTEXT_CHARS = 24_000
+LORE_CONTEXT_CHUNK_CHARS = 1_600
+
+
+def select_relevant_context(source: str, query: str, limit: int = LORE_CONTEXT_CHARS) -> str:
+    """Select bounded passages without keeping an index for a huge lore file."""
+    if len(source) <= limit:
+        return source
+    query_sample = query if len(query) <= 48_000 else _uniform_sample(query, 48_000)
+    query_tokens = normalize_tokens(query_sample)
+    chunk_size = LORE_CONTEXT_CHUNK_CHARS
+    chunk_count = max(1, limit // (chunk_size + 20))
+    diversity_count = min(chunk_count, max(1, chunk_count // 4))
+    chunk_total = max(1, (len(source) + chunk_size - 1) // chunk_size)
+    diverse_offsets = {
+        round((chunk_total - 1) * index / max(1, diversity_count - 1)) * chunk_size
+        for index in range(diversity_count)
+    }
+    best: list[tuple[int, int, str]] = [
+        (-1, -offset, source[offset:offset + chunk_size])
+        for offset in diverse_offsets
+    ]
+    heapq.heapify(best)
+    selected_offsets = set(diverse_offsets)
+    for offset in range(0, len(source), chunk_size):
+        if offset in selected_offsets:
+            continue
+        chunk = source[offset:offset + chunk_size]
+        score = len(query_tokens & normalize_tokens(chunk))
+        if score:
+            entry = (score, -offset, chunk)
+            if len(best) < chunk_count:
+                heapq.heappush(best, entry)
+            elif entry > best[0]:
+                heapq.heapreplace(best, entry)
+    if not best:
+        return _uniform_sample(source, limit)
+    selected = sorted(((-offset, chunk) for _score, offset, chunk in best), key=lambda item: item[0])
+    return "\n\n[...trecho selecionado da lore...]\n\n".join(chunk for _offset, chunk in selected)[:limit]
+
+
+def _uniform_sample(source: str, limit: int) -> str:
+    if len(source) <= limit:
+        return source
+    segment_count = max(1, limit // LORE_CONTEXT_CHUNK_CHARS)
+    segment_size = max(1, limit // segment_count)
+    last_start = max(0, len(source) - segment_size)
+    offsets = [round(last_start * index / max(1, segment_count - 1)) for index in range(segment_count)]
+    return "\n\n[...trecho omitido...]\n\n".join(source[offset:offset + segment_size] for offset in offsets)[:limit]
 
 
 def evaluate_lore(reference: str, submission: str, minimum_score: float = 0.28) -> LoreResult:
+    reference = select_relevant_context(reference, submission)
+    submission = select_relevant_context(submission, reference)
     if len(submission.strip()) < 120:
         return LoreResult(False, 0.0, (), "A história precisa ter pelo menos 120 caracteres.")
     reference_tokens = normalize_tokens(reference)

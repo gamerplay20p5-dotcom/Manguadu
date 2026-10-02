@@ -21,7 +21,8 @@ from .automation_scheduler import AutomationScheduler, get_timezone
 from .anticheat_alerts import AntiCheatMonitor
 from .bot_updater import BotUpdater
 from .credentials import decrypt_password, encrypt_password
-from .lore import evaluate_lore
+from .gemini import GEMINI_MODEL, GeminiError, evaluate_lore_with_gemini, test_gemini_key
+from .lore import MAX_LORE_CHARS, LoreResult, evaluate_lore
 from .pterodactyl import PterodactylClient, extract_ptero_error
 from .pz_data import PzData
 from .pz_map_renderer import create_map_png
@@ -53,6 +54,7 @@ CHANNEL_LABELS = {
     "wl_audit": "Auditoria da WL",
     "wl_decisions": "Decisões da WL",
 }
+MAX_LORE_UPLOAD_BYTES = 40 * 1024 * 1024
 
 
 def _channel_display(channel_id: int | None) -> str:
@@ -73,6 +75,27 @@ def _parse_players_output(value: str) -> list[str]:
             if clean_text(piece) and not clean_text(piece).isdigit()
         ]
     return []
+
+
+async def _read_lore_attachment(attachment: discord.Attachment) -> tuple[str | None, str | None]:
+    if not attachment.filename.casefold().endswith(".txt"):
+        return None, "Envie um arquivo de texto com extensao .txt."
+    if attachment.size > MAX_LORE_UPLOAD_BYTES:
+        return None, "O arquivo excede o limite de 40 MiB do bot."
+    try:
+        raw = await attachment.read()
+        if len(raw) > MAX_LORE_UPLOAD_BYTES:
+            return None, "O arquivo excede o limite de 40 MiB do bot."
+        content = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        return None, "O arquivo precisa estar codificado em UTF-8."
+    except discord.HTTPException:
+        return None, "Nao foi possivel baixar o arquivo anexado. Tente envia-lo novamente."
+    if len(content) > MAX_LORE_CHARS:
+        return None, f"A lore excede o limite de {MAX_LORE_CHARS:,} caracteres."
+    if not content:
+        return None, "O arquivo esta vazio."
+    return content, None
 
 
 def _configured_text_channel(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:
@@ -107,7 +130,7 @@ def _home_embed(config: dict[str, Any]) -> discord.Embed:
     embed = discord.Embed(title="⚙️ Configuração do Friendhost - PZ/Bot", description="Escolha uma seção abaixo. Alterações são salvas para este servidor Discord.", color=0x28D17C)
     embed.add_field(name="Tickets", value=f"Painel: {_channel_display(config['channels']['ticket_panel'])}\nCategoria: {_channel_display(config['ticket_category_id'])}", inline=False)
     embed.add_field(name="Whitelist", value=f"{'Ativa' if config['wl']['enabled'] else 'Pausada'} • Lore {'obrigatória' if config['wl']['require_lore'] else 'opcional'} • PZ: `{config['wl']['server_id']}`", inline=False)
-    embed.set_footer(text="Tokens, API do Pterodactyl e senha do RCON continuam no .env da VM.")
+    embed.set_footer(text="Discord, Pterodactyl e RCON ficam no .env. Configure o Gemini por /config_api.")
     return embed
 
 
@@ -214,7 +237,7 @@ class TicketsConfigView(AdminView):
 
 def wl_embed(config: dict[str, Any]) -> discord.Embed:
     wl = config["wl"]
-    embed = discord.Embed(title="🧟 Config WL", description="A triagem automática compara termos da história com a lore base. A equipe pode revisar cada pedido.", color=0x28D17C)
+    embed = discord.Embed(title="🧟 Config WL", description="Com uma chave em /config_api, o Gemini avalia coerência, cronologia e contradições. Sem chave, a triagem lexical local é usada. A equipe pode revisar cada pedido.", color=0x28D17C)
     embed.add_field(name="WL", value="Ativa" if wl["enabled"] else "Pausada")
     embed.add_field(name="Lore", value="Obrigatória" if wl["require_lore"] else "Opcional")
     embed.add_field(name="Falha na triagem", value="Revisão da equipe" if wl["review_failed_lore"] else "Recusa automática")
@@ -233,7 +256,7 @@ class LoreReferenceModal(discord.ui.Modal, title="Lore base da whitelist"):
         self.bot = bot
         self.guild_id = guild_id
         current = bot.store.get_settings(guild_id)["wl"]["lore_reference"]
-        self.reference = discord.ui.TextInput(label="Lore oficial do servidor", style=discord.TextStyle.paragraph, default=current[:4000], min_length=80, max_length=4000)
+        self.reference = discord.ui.TextInput(label="Lore oficial do servidor (até 4.000 caracteres)", style=discord.TextStyle.paragraph, default=current[:4000], min_length=80, max_length=4000)
         self.add_item(self.reference)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
@@ -294,7 +317,17 @@ class WhitelistConfigView(AdminView):
 
     @discord.ui.button(label="Definir lore base", style=discord.ButtonStyle.success, row=4)
     async def set_lore(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        if len(self.bot.store.get_settings(self.guild_id)["wl"]["lore_reference"]) > 4000:
+            await interaction.response.send_message("A lore atual é maior que o limite do modal do Discord. Use /config_lore e anexe um arquivo .txt para substituir a lore base.", ephemeral=True)
+            return
         await interaction.response.send_modal(LoreReferenceModal(self.bot, self.guild_id))
+
+    @discord.ui.button(label="Importar lore .txt", style=discord.ButtonStyle.primary, row=4)
+    async def import_lore_file(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_message(
+            f"Para configurar lore longa, use `/config_lore` em um canal privado da equipe e anexe um arquivo .txt. Limite do bot: {MAX_LORE_CHARS:,} caracteres. O campo de texto do modal do Discord aceita no maximo 4.000.",
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Canais da WL", style=discord.ButtonStyle.secondary, row=4)
     async def wl_channels(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -359,28 +392,142 @@ class TicketActionView(discord.ui.View):
             return
         await interaction.response.send_modal(WhitelistModal(self.bot, ticket, config["wl"]["require_lore"]))
 
+    @discord.ui.button(label="Enviar lore longa (.txt)", style=discord.ButtonStyle.secondary, custom_id="manguadu:ticket:wl-file:v1")
+    async def apply_whitelist_file(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        ticket = self.bot.store.get_ticket(interaction.channel_id)
+        if not ticket or ticket["status"] != "open" or ticket["user_id"] != interaction.user.id:
+            await interaction.response.send_message("Somente quem abriu este ticket pode enviar a WL.", ephemeral=True)
+            return
+        await interaction.response.send_message("Anexe o arquivo .txt e execute `/wl lore` selecionando esse arquivo. Depois, preencha usuario, personagem e senha no formulario privado. Limite do bot: 9.999.999 caracteres.", ephemeral=True)
+
     @discord.ui.button(label="Fechar ticket", emoji="🔒", style=discord.ButtonStyle.secondary, custom_id="manguadu:ticket:close:v1")
     async def close_ticket(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await self.bot.close_ticket(interaction)
 
 
 class WhitelistModal(discord.ui.Modal, title="Criação de personagem PZ"):
-    def __init__(self, bot: "ManguaduBot", ticket: dict[str, Any], require_lore: bool):
+    def __init__(self, bot: "ManguaduBot", ticket: dict[str, Any], require_lore: bool, lore_file_text: str | None = None):
         super().__init__()
         self.bot = bot
         self.ticket = ticket
         self.require_lore = require_lore
+        self.lore_file_text = lore_file_text
         self.username = discord.ui.TextInput(label="Usuário para entrar no PZ", min_length=3, max_length=32, placeholder="Ex.: Malaio_01")
         self.character = discord.ui.TextInput(label="Nome do personagem", min_length=2, max_length=80)
         self.password = discord.ui.TextInput(label="Senha PZ (opcional; vazio = gerada)", required=False, min_length=8, max_length=64, placeholder="8 a 64 caracteres sem espaços ou aspas")
-        self.lore = discord.ui.TextInput(label="História do personagem", style=discord.TextStyle.paragraph, required=require_lore, max_length=4000, placeholder="Conte como seu personagem se encaixa no mundo do servidor.")
         self.add_item(self.username)
         self.add_item(self.character)
         self.add_item(self.password)
-        self.add_item(self.lore)
+        if lore_file_text is None:
+            self.lore = discord.ui.TextInput(label="História do personagem (até 4.000)", style=discord.TextStyle.paragraph, required=require_lore, max_length=4000, placeholder="Para uma história maior, use Enviar lore longa (.txt).")
+            self.add_item(self.lore)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.bot.submit_whitelist(interaction, self.ticket, str(self.username.value).strip(), str(self.character.value).strip(), str(self.lore.value or "").strip(), str(self.password.value or ""))
+        lore = self.lore_file_text if self.lore_file_text is not None else str(self.lore.value or "").strip()
+        self.lore_file_text = None
+        await self.bot.submit_whitelist(interaction, self.ticket, str(self.username.value).strip(), str(self.character.value).strip(), lore, str(self.password.value or ""))
+
+
+class LoreUploadDraftView(discord.ui.View):
+    def __init__(self, bot: "ManguaduBot", ticket: dict[str, Any], lore_text: str):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.ticket = ticket
+        self.lore_text = lore_text
+
+    @discord.ui.button(label="Preencher dados da WL", style=discord.ButtonStyle.primary)
+    async def continue_form(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        current = self.bot.store.get_ticket(interaction.channel_id)
+        if not current or current["status"] != "open" or current["user_id"] != interaction.user.id:
+            await interaction.response.send_message("Este ticket nao esta mais aberto para voce.", ephemeral=True)
+            return
+        config = self.bot.store.get_settings(current["guild_id"])
+        if not config["wl"]["enabled"]:
+            await interaction.response.send_message("A criacao de WL esta pausada.", ephemeral=True)
+            return
+        if config["wl"]["require_lore"] and not config["wl"]["lore_reference"].strip():
+            await interaction.response.send_message("A equipe ainda nao definiu a lore base.", ephemeral=True)
+            return
+        lore_text, self.lore_text = self.lore_text, ""
+        await interaction.response.send_modal(WhitelistModal(self.bot, current, config["wl"]["require_lore"], lore_text))
+
+
+class GeminiKeyModal(discord.ui.Modal, title="Configurar chave Gemini"):
+    def __init__(self, bot: "ManguaduBot", guild_id: int):
+        super().__init__()
+        self.bot = bot
+        self.guild_id = guild_id
+        self.api_key = discord.ui.TextInput(
+            label="Chave da API do Google AI Studio",
+            min_length=20,
+            max_length=256,
+            required=True,
+            placeholder="A chave nao sera exibida pelo bot depois de salva",
+        )
+        self.add_item(self.api_key)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _admin_guard(interaction, self.bot.store):
+            return
+        try:
+            self.bot.store.set_gemini_api_key(self.guild_id, str(self.api_key.value))
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Chave Gemini salva criptografada neste bot. Ela nao foi enviada a nenhum canal; use Testar conexao para validar.",
+            ephemeral=True,
+        )
+
+
+class GeminiConfigView(AdminView):
+    def __init__(self, bot: "ManguaduBot", guild_id: int):
+        super().__init__(bot, guild_id)
+        self.add_item(discord.ui.Button(
+            label="Criar chave no Google AI Studio",
+            style=discord.ButtonStyle.link,
+            url="https://aistudio.google.com/apikey",
+        ))
+
+    def embed(self) -> discord.Embed:
+        configured = self.bot.store.has_gemini_api_key(self.guild_id)
+        embed = discord.Embed(
+            title="Configuracao Gemini",
+            description=(
+                f"Modelo: `{GEMINI_MODEL}`\nChave: {'configurada' if configured else 'nao configurada'}\n\n"
+                "A chave fica criptografada no armazenamento local do bot. A analise envia somente trechos da lore base e da historia; nao envia senha PZ, ID Discord ou usuario PZ. "
+                "A camada gratuita do Gemini pode usar prompts para melhorar os produtos Google. Configure a IA somente se isso for aceitavel para a comunidade."
+            ),
+            color=0x4285F4,
+        )
+        return embed
+
+    @discord.ui.button(label="Configurar / trocar chave", style=discord.ButtonStyle.primary)
+    async def configure(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(GeminiKeyModal(self.bot, self.guild_id))
+
+    @discord.ui.button(label="Testar conexao", style=discord.ButtonStyle.success)
+    async def test_connection(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        try:
+            api_key = self.bot.store.get_gemini_api_key(self.guild_id)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        if not api_key:
+            await interaction.response.send_message("Configure a chave Gemini primeiro.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await test_gemini_key(api_key)
+        except GeminiError as exc:
+            await interaction.followup.send(f"Teste Gemini falhou: {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(f"Gemini respondeu pelo modelo `{GEMINI_MODEL}`.", ephemeral=True)
+
+    @discord.ui.button(label="Remover chave", style=discord.ButtonStyle.danger)
+    async def remove_key(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        self.bot.store.clear_gemini_api_key(self.guild_id)
+        await interaction.response.edit_message(embed=self.embed(), view=self)
 
 
 class ReviewView(discord.ui.View):
@@ -479,6 +626,78 @@ class ManguaduBot(discord.Client):
                 return
             config = self.store.get_settings(interaction.guild.id)
             await interaction.response.send_message(embed=_home_embed(config), view=ConfigHomeView(self, interaction.guild.id), ephemeral=True)
+
+        @self.tree.command(name="config_api", description="Configura com privacidade a chave Gemini usada na analise de lore")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def config_api(interaction: discord.Interaction) -> None:
+            if not await _admin_guard(interaction, self.store):
+                return
+            view = GeminiConfigView(self, interaction.guild.id)
+            await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+
+        @self.tree.command(name="config_lore", description="Importa lore base em arquivo .txt (ate 9.999.999 caracteres)")
+        @app_commands.describe(arquivo="Arquivo UTF-8 .txt com a lore oficial; use em canal privado da equipe")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def config_lore(interaction: discord.Interaction, arquivo: discord.Attachment) -> None:
+            if not await _admin_guard(interaction, self.store):
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            content, error = await _read_lore_attachment(arquivo)
+            if error:
+                await interaction.followup.send(error, ephemeral=True)
+                return
+            if len(content) < 80:
+                await interaction.followup.send("A lore base precisa ter pelo menos 80 caracteres.", ephemeral=True)
+                return
+            try:
+                await asyncio.to_thread(self.store.set_value, interaction.guild.id, "wl", "lore_reference", content)
+            except ValueError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            compressed_bytes = len(content.encode("utf-8"))
+            await interaction.followup.send(
+                f"Lore base salva: {len(content):,} caracteres. Armazenamento SQLite comprimido (arquivo original: {compressed_bytes:,} bytes).",
+                ephemeral=True,
+            )
+
+        wl_group = app_commands.Group(name="wl", description="Envia uma candidatura de whitelist neste ticket")
+
+        @wl_group.command(name="lore", description="Anexa lore longa em .txt e abre o formulario privado da WL")
+        @app_commands.describe(arquivo="Arquivo UTF-8 .txt com a historia do personagem")
+        @app_commands.guild_only()
+        async def wl_lore_file(interaction: discord.Interaction, arquivo: discord.Attachment) -> None:
+            ticket = self.store.get_ticket(interaction.channel_id)
+            if not ticket or ticket["status"] != "open" or ticket["user_id"] != interaction.user.id:
+                await interaction.response.send_message("Use este comando no ticket aberto por voce.", ephemeral=True)
+                return
+            config = self.store.get_settings(ticket["guild_id"])
+            if not config["wl"]["enabled"]:
+                await interaction.response.send_message("A criacao de WL esta pausada.", ephemeral=True)
+                return
+            if config["wl"]["require_lore"] and not config["wl"]["lore_reference"].strip():
+                await interaction.response.send_message("A equipe ainda nao definiu a lore base.", ephemeral=True)
+                return
+            existing = self.store.get_request(ticket["channel_id"])
+            if existing and existing["status"] in ("review", "processing", "approved"):
+                await interaction.response.send_message("Ja existe um pedido de WL em andamento neste ticket.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            content, error = await _read_lore_attachment(arquivo)
+            if error:
+                await interaction.followup.send(error, ephemeral=True)
+                return
+            if len(content) < 120:
+                await interaction.followup.send("A historia do personagem precisa ter pelo menos 120 caracteres.", ephemeral=True)
+                return
+            await interaction.followup.send(
+                f"Arquivo recebido ({len(content):,} caracteres). Clique para preencher seus dados no formulario privado.",
+                view=LoreUploadDraftView(self, ticket, content),
+                ephemeral=True,
+            )
+
+        self.tree.add_command(wl_group)
 
         bot_commands = app_commands.Group(name="bot", description="Atualizacao e manutencao do bot")
 
@@ -1808,6 +2027,9 @@ class ManguaduBot(discord.Client):
         if interaction.channel_id != ticket["channel_id"] or interaction.user.id != ticket["user_id"] or ticket["status"] != "open":
             await interaction.response.send_message("Ticket inválido ou fechado.", ephemeral=True)
             return
+        if len(lore) > MAX_LORE_CHARS:
+            await interaction.response.send_message(f"A lore excede o limite de {MAX_LORE_CHARS:,} caracteres.", ephemeral=True)
+            return
         try:
             adduser_command(username, password_input or "A" * 12)
         except ValueError as exc:
@@ -1825,10 +2047,23 @@ class ManguaduBot(discord.Client):
         if existing and existing["status"] in ("review", "processing", "approved"):
             await interaction.response.send_message("Já existe um pedido de WL em andamento neste ticket.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = None
         if wl["require_lore"]:
-            result = evaluate_lore(wl["lore_reference"], lore, float(wl["lore_min_score"]))
-        else:
-            result = None
+            try:
+                api_key = self.store.get_gemini_api_key(ticket["guild_id"])
+            except ValueError as exc:
+                logger.error("Chave Gemini da guild %s nao pode ser descriptografada: %s", ticket["guild_id"], exc)
+                api_key = ""
+                result = LoreResult(False, 0.0, (), "A chave Gemini armazenada esta indisponivel; a equipe precisa revisar este pedido.", source="gemini_error")
+            if api_key:
+                try:
+                    result = await evaluate_lore_with_gemini(api_key, wl["lore_reference"], lore)
+                except GeminiError as exc:
+                    logger.warning("Gemini indisponivel para triagem da guild %s: %s", ticket["guild_id"], exc)
+                    result = LoreResult(False, 0.0, (), f"O Gemini nao conseguiu concluir a analise ({exc}); revisao humana necessaria.", source="gemini_error")
+            elif result is None:
+                result = await asyncio.to_thread(evaluate_lore, wl["lore_reference"], lore, float(wl["lore_min_score"]))
         auto_ready = bool(
             wl["auto_approve"]
             and _configured_private_channel(interaction.guild, config["channels"]["wl_audit"])
@@ -1836,28 +2071,36 @@ class ManguaduBot(discord.Client):
         )
         if not auto_ready:
             status = "review"
+        elif result and result.source == "gemini_error":
+            status = "review"
         elif result and not result.approved:
-            status = "review" if wl["review_failed_lore"] else "rejected"
+            status = "review" if result.decision == "review" or wl["review_failed_lore"] else "rejected"
         else:
             status = "pending"
         secret = os.getenv("WL_ENCRYPTION_KEY") or os.getenv("DISCORD_TOKEN", "")
         ciphertext = encrypt_password(password_input, secret) if password_input and status != "rejected" else ""
-        self.store.save_request(ticket["channel_id"], ticket["guild_id"], ticket["user_id"], username, character, lore, result.score if result else 1.0, status, ciphertext)
+        await asyncio.to_thread(
+            self.store.save_request,
+            ticket["channel_id"], ticket["guild_id"], ticket["user_id"], username, character, lore,
+            result.score if result else 1.0, status, ciphertext, result.to_payload() if result else None,
+        )
         if status == "rejected":
             lore_id = config["channels"]["lore"]
             link = f" Leia a lore em <#{lore_id}> e tente novamente." if lore_id else " Leia a lore oficial e tente novamente."
-            await interaction.response.send_message(f"Sua história não passou na triagem inicial: {result.reason}{link}", ephemeral=True)
-            await interaction.channel.send(f"<@{ticket['user_id']}>, sua WL foi recusada pela triagem: {result.reason}{link}", allowed_mentions=discord.AllowedMentions(users=True))
+            await interaction.followup.send(f"Sua história não passou na triagem inicial: {result.reason}{link}", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.channel.send(
+                f"<@{ticket['user_id']}>, sua WL foi recusada pela triagem: {result.reason}{link}",
+                allowed_mentions=discord.AllowedMentions(users=[interaction.user]),
+            )
             rejected_request = self.store.get_request(ticket["channel_id"])
             await self.post_decision(interaction.guild, rejected_request, False, result.reason)
             await self.post_audit(interaction.guild, rejected_request, "Reprovada automaticamente", result.reason)
             return
         if status == "review":
-            await interaction.response.send_message("Sua história foi encaminhada para revisão da equipe.", ephemeral=True)
+            await interaction.followup.send("Sua história foi encaminhada para revisão da equipe.", ephemeral=True)
             await self.post_review(interaction.channel, ticket, username, character, lore, result)
             await self.post_audit(interaction.guild, self.store.get_request(ticket["channel_id"]), "Em revisão", result.reason if result else "Lore não exigida.")
             return
-        await interaction.response.defer(ephemeral=True)
         await self.post_review(interaction.channel, ticket, username, character, lore, result)
         feedback = await self.issue_whitelist(interaction.channel, ticket["channel_id"])
         updated_request = self.store.get_request(ticket["channel_id"])
@@ -1878,8 +2121,12 @@ class ManguaduBot(discord.Client):
         embed.add_field(name="Personagem", value=discord.utils.escape_markdown(request["character_name"]), inline=False)
         embed.add_field(name="Motivo", value=reason[:1000], inline=False)
         if config["wl"]["require_lore"]:
-            triage = evaluate_lore(config["wl"]["lore_reference"], request.get("lore", ""), float(config["wl"]["lore_min_score"]))
+            triage = LoreResult.from_payload(request.get("triage")) or evaluate_lore(config["wl"]["lore_reference"], request.get("lore", ""), float(config["wl"]["lore_min_score"]))
             embed.add_field(name="Coerências encontradas", value=", ".join(triage.common_terms[:15]) or "Nenhuma", inline=False)
+            if triage.summary:
+                embed.add_field(name="Resumo da análise", value=triage.summary[:900], inline=False)
+            if triage.contradictions:
+                embed.add_field(name="Possíveis contradições", value="\n".join(triage.contradictions)[:900], inline=False)
         embed.add_field(name="Ticket", value=f"<#{request['channel_id']}>")
         try:
             await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
@@ -1894,14 +2141,18 @@ class ManguaduBot(discord.Client):
             logger.warning("Canal de auditoria da WL ausente na guild %s", guild.id)
             return
         reference = config["wl"]["lore_reference"]
-        result = evaluate_lore(reference, request["lore"], float(config["wl"]["lore_min_score"])) if config["wl"]["require_lore"] else None
+        result = (LoreResult.from_payload(request.get("triage")) or evaluate_lore(reference, request["lore"], float(config["wl"]["lore_min_score"]))) if config["wl"]["require_lore"] else None
         embed = discord.Embed(title=f"📋 WL: {decision}", color=0x28D17C if request["status"] == "approved" else 0xE8B44B)
         embed.add_field(name="Candidato", value=f"<@{request['user_id']}> • `{request['username']}`", inline=False)
         embed.add_field(name="Personagem", value=discord.utils.escape_markdown(request["character_name"]), inline=False)
         embed.add_field(name="Motivo", value=reason[:900], inline=False)
         if result:
             embed.add_field(name="Coerências detectadas", value=", ".join(result.common_terms[:20]) or "Nenhuma", inline=False)
-            embed.add_field(name="Pontuação lexical", value=f"{result.score:.0%}")
+            embed.add_field(name="Confiança da triagem", value=f"{result.score:.0%} ({'Gemini' if result.source == 'gemini' else 'local'})")
+            if result.summary:
+                embed.add_field(name="Resumo da análise", value=result.summary[:900], inline=False)
+            if result.contradictions:
+                embed.add_field(name="Contradições apontadas", value="\n".join(result.contradictions)[:900], inline=False)
         embed.add_field(name="Resumo da lore enviada", value=(request["lore"][:900] + "…") if len(request["lore"]) > 900 else request["lore"] or "Não informada", inline=False)
         embed.add_field(name="Ticket", value=f"<#{request['channel_id']}>")
         try:
@@ -1914,6 +2165,13 @@ class ManguaduBot(discord.Client):
         embed.add_field(name="Usuário PZ", value=discord.utils.escape_markdown(username))
         embed.add_field(name="Personagem", value=discord.utils.escape_markdown(character))
         embed.add_field(name="Triagem", value=f"{result.reason} (pontuação {result.score:.0%})" if result else "Lore não exigida", inline=False)
+        if result and result.decision:
+            suggested = {"approve": "Aprovar", "review": "Revisar manualmente", "reject": "Reprovar"}.get(result.decision, "Revisar manualmente")
+            embed.add_field(name="Sugestão do Gemini", value=suggested)
+        if result and result.summary:
+            embed.add_field(name="Resumo da análise", value=result.summary[:900], inline=False)
+        if result and result.contradictions:
+            embed.add_field(name="Contradições possíveis", value="\n".join(result.contradictions)[:900], inline=False)
         embed.add_field(name="História", value=lore[:1000] or "Não informada", inline=False)
         role_id = self.store.get_settings(ticket["guild_id"])["admin_role_id"]
         mention = f"<@&{role_id}>" if role_id else ""

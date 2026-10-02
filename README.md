@@ -6,9 +6,9 @@ O pacote Python ainda se chama `manguadu` para preservar o comando de inicializa
 
 ## O que o bot faz
 
-- **Configuração no Discord:** `/config_bot` abre uma interface administrativa por servidor Discord para canais, equipe, categoria de tickets e regras da WL. Essas opções ficam em SQLite; segredos de infraestrutura continuam na VM.
+- **Configuração no Discord:** `/config_bot` abre uma interface administrativa por servidor Discord para canais, equipe, categoria de tickets e regras da WL. `/config_api` recebe e testa a chave Gemini por um painel privado. As credenciais de Pterodactyl e RCON continuam na VM.
 - **Tickets e whitelist:** cria canais privados, coleta personagem, senha opcional e lore, permite revisão manual ou triagem automática e executa `adduser` via RCON. Senhas ausentes são geradas pelo bot. Aprovações e reprovações, com motivos, são publicadas no canal de decisões configurado; o resultado não é enviado ao chat do jogo. Credenciais são entregues por DM ou no ticket privado.
-- **Validação de lore:** compara a história enviada com a lore base configurada. A equipe pode decidir manualmente; no modo automático, o bot registra no canal de auditoria o resumo e as coerências consideradas.
+- **Validação de lore:** com Gemini configurado, avalia coerência narrativa, cronologia e contradições, produzindo resumo e evidências para a equipe. Sem chave, usa a triagem lexical local. Textos longos podem ser importados em `.txt` até 9.999.999 caracteres; ficam comprimidos no SQLite e apenas trechos limitados são enviados ao modelo.
 - **Administração PZ:** consulta jogadores, ficha, skills, traits, safehouses, arquivos e logs; oferece operações administrativas, RCON, controle do servidor, backups e ferramentas de wipe com verificações de segurança.
 - **FriendHost e anticheat:** lê arquivos de dados do mod, produz status e rankings, acompanha evoluções e mortes, espelha eventos de chat/login/logout e encaminha alertas do PZAntiCheat.
 - **Painéis e rotinas:** monta painéis de status e ranking, relaciona nomes PZ a membros Discord, personaliza imagens/temas e agenda tarefas de servidor.
@@ -49,8 +49,9 @@ python -m manguadu --bot       # inicia o bot Discord
 
 1. Convide o bot com permissões para ver canais, enviar mensagens, gerenciar canais e usar comandos de aplicação. Habilite os intents necessários no Developer Portal se a configuração do aplicativo exigir.
 2. Execute `/config_bot` como administrador e escolha canais, categoria de tickets, cargo da equipe e opções da WL.
-3. Em **Config WL**, escolha o servidor, defina se a lore é obrigatória, forneça a lore base e selecione revisão manual ou automática.
-4. Configure no `.env` da VM `PTERO_URL`, `PTERO_SERVER_ID`, `PTERO_API_KEY` e os dados de RCON. Esses segredos não são gravados pela UI do Discord.
+3. Em **Config WL**, escolha o servidor, defina se a lore é obrigatória e selecione revisão manual ou automática. Para lore acima de 4.000 caracteres, use `/config_lore` com um arquivo `.txt` UTF-8 em um canal privado da equipe.
+4. Use `/config_api`, abra o Google AI Studio pelo botão do painel, crie uma chave, cole-a no modal privado e teste a conexão. A camada gratuita pode usar prompts para melhorar produtos Google; o painel informa isso antes da configuração.
+5. Configure no `.env` da VM `PTERO_URL`, `PTERO_SERVER_ID`, `PTERO_API_KEY` e os dados de RCON. Esses segredos de infraestrutura não são gravados pela UI do Discord.
 5. Consulte [PZ_COMMANDS.md](PZ_COMMANDS.md) para os comandos e fluxos do servidor e [DEPLOY.md](DEPLOY.md) para o processo de produção.
 
 ### Canais da WL
@@ -61,9 +62,9 @@ python -m manguadu --bot       # inicia o bot Discord
 
 ## Configuração e dados
 
-`/config_bot` guarda no SQLite IDs de canais, categoria, cargo e regras de WL por servidor Discord. O arquivo local `data/bot-config.sqlite3` deve ser preservado entre atualizações.
+`/config_bot` guarda no SQLite IDs de canais, categoria, cargo e regras de WL por servidor Discord. O arquivo local `data/bot-config.sqlite3` deve ser preservado entre atualizações. A chave Gemini fica cifrada nesse banco; preserve também `data/bot-config.sqlite3.key` para que o bot possa decifrá-la após reiniciar ou restaurar backup.
 
-Credenciais do Discord, Pterodactyl, RCON e uma eventual chave privada do GitHub vivem apenas no `.env` da VM. `BOT_GITHUB_TOKEN` pode ficar vazio para repositório público. Para instalação, veja [`.env.example`](.env.example); os arquivos de servidor e mapa têm exemplos em `config/`.
+Credenciais do Discord, Pterodactyl, RCON e uma eventual chave privada do GitHub vivem apenas no `.env` da VM. A chave Gemini é cadastrada pela UI e cifrada localmente. `BOT_GITHUB_TOKEN` pode ficar vazio para repositório público. Para instalação, veja [`.env.example`](.env.example); os arquivos de servidor e mapa têm exemplos em `config/`.
 
 Para instalar em vários servidores PZ, copie `config/servers.example.json` para `config/servers.json` e preencha os identificadores e nomes das variáveis de ambiente. Não coloque os valores dos segredos diretamente nesse JSON.
 

@@ -89,6 +89,15 @@ Os comandos dependem dos arquivos FriendHost apontados por `CSV_BASE_PATH`. A lo
 
 As rotinas monitoram aumentos de skills, novas mortes FriendHost e os logs de chat/login/logout. Alertas PZAntiCheat são agrupados e encaminhados ao canal configurado. `WEBHOOK_CHAT` continua opcional para espelhar as mensagens do jogo.
 
+## Tickets, WL e Gemini
+
+- `/config_bot` abre a configuração de tickets e da WL. Escolha a categoria e o canal do painel de tickets, depois publique o painel pela interface.
+- Em **Config WL**, defina a lore obrigatória, os canais de auditoria e decisões e o modo manual ou automático. Aprovações e reprovações, com seus motivos, vão para o canal de decisões do Discord; nada é enviado ao chat do Project Zomboid.
+- `/config_lore` importa a lore oficial por arquivo `.txt` UTF-8 em um canal privado da equipe. O limite do bot é 9.999.999 caracteres e o arquivo é comprimido no SQLite. O Discord limita cada campo de modal a 4.000 caracteres; textos maiores precisam ser anexados como arquivo.
+- `/config_api` abre o painel privado da chave Gemini: crie uma chave no Google AI Studio pelo botão, configure-a no modal e selecione **Testar conexão**. A chave é cifrada no banco local `data/bot-config.sqlite3`; preserve também `data/bot-config.sqlite3.key` nos backups.
+- Dentro do ticket, o jogador pode usar **Criar personagem / WL** para a história curta ou anexar um `.txt` e executar `/wl lore` para a história longa. O bot então coleta usuário PZ, personagem e senha opcional em um formulário privado; se não houver senha, gera uma.
+- O Gemini faz a análise narrativa da WL e registra resumo, coerências, contradições e confiança no canal de auditoria. Senha, usuário PZ e ID Discord não são enviados ao modelo. Quando faltar evidência ou o Gemini falhar, o pedido segue para revisão humana; a cota gratuita pode impor limites temporários.
+
 ## Administracao
 
 - Wipes: `/wipe_zeds`, `/wipe`, `/wipe_force`, `/wipe_teste`, `/wipe_chunk`, `/wipe_chunk_force` e `/wipe_chunk_teste`

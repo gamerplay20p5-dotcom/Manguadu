@@ -90,6 +90,7 @@ O canal de decisões recebe aprovações e reprovações com os motivos no Disco
 
 - `.env`
 - `data/bot-config.sqlite3` e outros estados em `data/`
+- `data/bot-config.sqlite3.key` junto do banco, para descriptografar a chave Gemini
 - `data/automations.json`, temas, mídias e logs
 - `config/pz-maps.json` se tiver coordenadas específicas
 - `.venv/`
@@ -103,3 +104,11 @@ Configure no `.env` a mesma senha usada em `RCONPassword` no servidor PZ, alem d
 Depois de atualizar, rode `/rcon` com `players`. A resposta identifica se falhou na conexao TCP, autenticacao ou execucao do comando. Falha TCP normalmente aponta para IP, porta, publicacao da porta ou firewall. Recusa de autenticacao aponta para uma senha diferente entre o `.env` e a configuracao do servidor.
 
 O bot le o arquivo `.env` na raiz desta instalacao; `.env.example` serve apenas como modelo. Se RCON e Pterodactyl aparecerem como incompletos, execute `.venv/bin/python -m manguadu` na pasta do bot. O diagnostico mostra os nomes dos campos ausentes sem imprimir senhas ou chaves. Se `config/servers.json` usar `passwordEnv` ou `apiKeyEnv`, preencha no `.env` os nomes de variaveis indicados por esses campos. Valores preenchidos no `.env` prevalecem sobre valores antigos guardados no ambiente do PM2 apos reiniciar o processo.
+
+## IA e lore longa
+
+Use `/config_api` como administrador para guardar a chave Gemini pelo Discord. O bot cifra a chave em `data/bot-config.sqlite3` usando `data/bot-config.sqlite3.key`; mantenha os dois arquivos juntos nos backups. Se o arquivo `.key` for perdido, sera preciso cadastrar a chave Gemini novamente. A chave nao precisa ser incluida no `.env`.
+
+Com `/config_lore`, anexe um `.txt` UTF-8 em um canal privado da equipe para importar a lore oficial, ate 9.999.999 caracteres. No ticket, o jogador pode usar `/wl lore` para anexar a historia longa; o bot abre um formulario privado para usuario PZ, personagem e senha. O modal de texto do Discord aceita no maximo 4.000 caracteres, entao textos maiores precisam ser enviados como arquivo. O bot limita cada arquivo a 40 MiB e comprime a lore antes de gravar no SQLite.
+
+O Gemini usa `gemini-3.5-flash-lite`, com triagem semantica, evidencias, coerencias e contradicoes. Trechos longos sao pre-selecionados localmente para limitar RAM e tamanho da requisicao; a IA precisa encaminhar para revisao quando os trechos nao sustentarem uma conclusao. Sem chave configurada, o bot continua com a triagem lexical local. O uso gratuito pode permitir que o Google use prompts para melhorar produtos; a tela `/config_api` avisa antes da configuracao. Confira a [tabela oficial de precos e uso de dados do Gemini](https://ai.google.dev/gemini-api/docs/pricing) e as [regras oficiais de componentes modal do Discord](https://github.com/discord/discord-api-docs/blob/main/developers/components/using-modal-components.mdx).
