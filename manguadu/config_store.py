@@ -40,6 +40,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auto_approve": False,
         "server_id": "default",
     },
+    "kick_automatico": {
+        "enabled": False,
+        "voice_channel_id": None,
+    },
 }
 
 
@@ -49,6 +53,7 @@ def _merged_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         return config
     config["channels"].update(raw.get("channels") if isinstance(raw.get("channels"), dict) else {})
     config["wl"].update(raw.get("wl") if isinstance(raw.get("wl"), dict) else {})
+    config["kick_automatico"].update(raw.get("kick_automatico") if isinstance(raw.get("kick_automatico"), dict) else {})
     for key in ("ticket_category_id", "admin_role_id", "ticket_panel_message_id", "stats_panel_message_id", "ranking_panel_message_id"):
         if key in raw:
             config[key] = raw[key]
@@ -228,7 +233,7 @@ class ConfigStore:
         return normalized
 
     def set_value(self, guild_id: int, section: str, key: str, value: Any) -> dict[str, Any]:
-        if section not in ("channels", "wl") or key not in DEFAULT_SETTINGS[section]:
+        if section not in ("channels", "wl", "kick_automatico") or key not in DEFAULT_SETTINGS[section]:
             raise ValueError("Campo de configuracao desconhecido")
         with self._lock:
             config = self.get_settings(guild_id)
@@ -314,6 +319,21 @@ class ConfigStore:
             except json.JSONDecodeError:
                 request["triage"] = {}
             return request
+
+    def get_latest_request_by_username(self, guild_id: int, username: str) -> dict[str, Any] | None:
+        wanted = username.strip().casefold()
+        if not wanted:
+            return None
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT channel_id, username FROM wl_requests WHERE guild_id = ? ORDER BY updated_at DESC, rowid DESC",
+                (guild_id,),
+            ).fetchall()
+            channel_id = next(
+                (int(row["channel_id"]) for row in rows if str(row["username"]).strip().casefold() == wanted),
+                None,
+            )
+        return self.get_request(channel_id) if channel_id is not None else None
 
     def save_request(self, channel_id: int, guild_id: int, user_id: int, username: str, character_name: str, lore: str, score: float, status: str, password_ciphertext: str = "", triage: dict[str, Any] | None = None) -> None:
         if len(lore) > MAX_LORE_CHARS:

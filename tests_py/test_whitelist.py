@@ -44,6 +44,34 @@ def test_ticket_and_whitelist_state_survive_restart(tmp_path: Path) -> None:
     store.close()
 
 
+def test_latest_wl_request_can_be_loaded_by_pz_username(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "bot.sqlite3")
+    store.save_request(33, 11, 22, "Jogador", "Primeiro", "Lore antiga", 0.4, "rejected")
+    store.save_request(34, 11, 23, "jogador", "Segundo", "Lore mais recente", 0.8, "approved")
+    store.save_request(35, 12, 24, "Jogador", "Outro servidor", "Lore de outra guild", 0.8, "approved")
+
+    request = store.get_latest_request_by_username(11, "JOGADOR")
+    assert request is not None
+    assert request["channel_id"] == 34
+    assert request["lore"] == "Lore mais recente"
+    assert store.get_latest_request_by_username(99, "Jogador") is None
+    store.close()
+
+
+def test_lore_export_files_preserve_utf8_when_split() -> None:
+    from manguadu.discord_bot import _make_lore_files
+
+    lore = "á🙂café\n" * 20
+    files = _make_lore_files(lore, "Jogador de Teste", max_file_bytes=32)
+    try:
+        assert len(files) > 1
+        assert all(file.filename.endswith(".txt") for file in files)
+        assert b"".join(file.fp.read() for file in files).decode("utf-8") == lore
+    finally:
+        for file in files:
+            file.close()
+
+
 def test_lore_triage_explains_overlap_and_missing_context() -> None:
     reference = "Knox ficou isolada após a epidemia. Muldraugh perdeu comunicação, Rosewood virou abrigo, sobreviventes buscaram água e remédios."
     good = "Meu personagem saiu de Muldraugh quando a epidemia isolou Knox. Em Rosewood, procurou abrigo para sobreviventes e reuniu água e remédios com sua irmã antes do inverno chegar."
@@ -232,7 +260,7 @@ def test_discord_views_fit_rows_and_public_buttons_persist() -> None:
     bot = ManguaduBot(store)
     commands = bot.tree.get_commands()
     assert {command.name for command in commands} == {
-        "config_bot", "bot", "online", "info", "skills", "traits", "rank",
+        "config_bot", "config_api", "config_lore", "config_kick_automatico", "wl", "bot", "online", "info", "skills", "traits", "rank",
         "localizar_veiculo", "mapas", "gps", "satelite", "wipe_zeds", "wipe", "wipe_force",
         "wipe_teste", "wipe_chunk", "wipe_chunk_force", "wipe_chunk_teste",
         "rcon", "servidor", "status", "statuscomplete", "logs", "safehouse",
@@ -240,6 +268,8 @@ def test_discord_views_fit_rows_and_public_buttons_persist() -> None:
         "godmode", "invisible", "grantadmin", "removeadmin", "tpto", "tp",
         "servermsg", "deletearquivo", "painel", "automacao",
     }
+    wl_group = next(command for command in commands if command.name == "wl")
+    assert {command.name for command in wl_group.commands} == {"lore", "puxar_lore"}
     assert all(command.to_dict(bot.tree)["name"] == command.name for command in commands)
     assert len(WhitelistConfigView(bot, 11).to_components()) <= 5
     assert len(WhitelistChannelsView(bot, 11).to_components()) <= 5
@@ -263,3 +293,39 @@ def test_audit_requires_private_channel(monkeypatch: pytest.MonkeyPatch) -> None
     assert discord_bot._configured_private_channel(guild, 1) is not None
     monkeypatch.setattr(discord_bot, "_configured_text_channel", lambda _guild, _id: Channel(public=True))
     assert discord_bot._configured_private_channel(guild, 1) is None
+
+
+def test_approved_lore_is_attached_to_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from manguadu import discord_bot
+
+    store = ConfigStore(":memory:")
+    store.set_value(11, "channels", "wl_audit", 456)
+    store.set_value(11, "wl", "require_lore", False)
+    bot = discord_bot.ManguaduBot(store)
+    sent = []
+
+    class Channel:
+        async def send(self, **kwargs: object) -> None:
+            sent.append(kwargs)
+
+    channel = Channel()
+    monkeypatch.setattr(discord_bot, "_configured_private_channel", lambda _guild, channel_id: channel if channel_id == 456 else None)
+    guild = SimpleNamespace(id=11, filesize_limit=1024)
+    approved = {
+        "status": "approved", "user_id": 22, "username": "Jogador", "character_name": "Sobrevivente",
+        "channel_id": 33, "lore": "Lore aprovada com conteúdo completo.",
+    }
+    rejected = {**approved, "status": "rejected"}
+
+    async def scenario() -> None:
+        await bot.post_audit(guild, approved, "Aprovada", "A equipe aceitou a WL.")
+        await bot.post_audit(guild, rejected, "Reprovada", "A lore não foi aceita.")
+
+    asyncio.run(scenario())
+    assert len(sent) == 2
+    file = sent[0]["file"]
+    assert file.filename == "lore-Jogador.txt"
+    assert file.fp.read().decode("utf-8") == approved["lore"]
+    assert "file" not in sent[1]
+    file.close()
+    store.close()

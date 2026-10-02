@@ -27,7 +27,7 @@ from .pterodactyl import PterodactylClient, extract_ptero_error
 from .pz_data import PzData
 from .pz_map_renderer import create_map_png
 from .pz_path_discovery import discover_and_persist_ptero_paths
-from .panel_player_links import get_player_link, remove_player_link, set_player_link
+from .panel_player_links import get_player_link, load_player_links, remove_player_link, set_player_link
 from .panel_reports import build_ranking_panel, build_server_panel, build_server_status_embed
 from .panel_theme import get_draft_theme, save_draft_theme, store_panel_media, update_draft_theme
 from .player_data import collect_player_snapshot
@@ -65,16 +65,44 @@ def _quote_pz(value: str) -> str:
     return '"' + clean_text(value).replace('"', "").replace("\r", "").replace("\n", "") + '"'
 
 
-def _parse_players_output(value: str) -> list[str]:
+def _parse_players_snapshot(value: str) -> list[str] | None:
+    """Return a complete PZ players list, or None if RCON output is ambiguous."""
     lines = [clean_text(line) for line in clean_text(value).splitlines() if clean_text(line)]
-    if len(lines) > 1:
-        return [name for line in lines[1:] if (name := re.sub(r"^[-*]\s*", "", line)).strip()]
-    if lines and ":" in lines[0]:
-        return [
-            clean_text(piece) for piece in re.split(r"[,;]+", lines[0].split(":", 1)[1])
-            if clean_text(piece) and not clean_text(piece).isdigit()
-        ]
-    return []
+    header_index = next((index for index, line in enumerate(lines) if re.match(r"players\s+connected\b", line, re.I)), None)
+    if header_index is None:
+        return None
+
+    header = lines[header_index]
+    count_match = re.search(r"\((\d+)\)", header)
+    count = int(count_match.group(1)) if count_match else None
+    suffix = header.split(":", 1)[1].strip() if ":" in header else ""
+    if count is None and suffix.isdigit():
+        count, suffix = int(suffix), ""
+    elif count is None and (leading_count := re.match(r"^(\d+)\s*[,;]\s*", suffix)):
+        count = int(leading_count.group(1))
+        suffix = suffix[leading_count.end():].strip()
+
+    names: list[str] = []
+    candidates = ([suffix] if suffix and suffix != str(count) else []) + lines[header_index + 1:]
+    for candidate in candidates:
+        for piece in re.split(r"[,;]+", candidate):
+            name = clean_text(re.sub(r"^\d+[.)]\s+", "", re.sub(r"^[-*•]\s*", "", piece)))
+            if name and name.casefold() not in {"players connected", "none", "no players"}:
+                names.append(name)
+
+    # Duplicate output, count-only output for a non-empty server, and unknown
+    # formats must never be treated as a trustworthy snapshot for enforcement.
+    names = list(dict.fromkeys(names))
+    if count is not None:
+        if count == 0 and not names:
+            return []
+        if count != len(names):
+            return None
+    return names or None
+
+
+def _parse_players_output(value: str) -> list[str]:
+    return _parse_players_snapshot(value) or []
 
 
 async def _read_lore_attachment(attachment: discord.Attachment) -> tuple[str | None, str | None]:
@@ -96,6 +124,35 @@ async def _read_lore_attachment(attachment: discord.Attachment) -> tuple[str | N
     if not content:
         return None, "O arquivo esta vazio."
     return content, None
+
+
+def _make_lore_files(lore: str, username: str, max_file_bytes: int) -> list[discord.File]:
+    """Build UTF-8 text attachments, splitting only when Discord's file limit requires it."""
+    payload = lore.encode("utf-8")
+    if not payload:
+        return []
+    limit = max(1, int(max_file_bytes))
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < len(payload):
+        end = min(offset + limit, len(payload))
+        if end < len(payload):
+            while end > offset and payload[end] & 0xC0 == 0x80:
+                end -= 1
+        if end <= offset:
+            raise ValueError("O limite de anexo do Discord e pequeno demais para exportar esta lore.")
+        chunks.append(payload[offset:end])
+        offset = end
+        if len(chunks) > 10:
+            raise ValueError("A lore excede o limite de anexos deste servidor Discord; aumente o limite de upload ou reduza o arquivo.")
+
+    safe_username = re.sub(r"[^A-Za-z0-9._-]+", "_", clean_text(username)).strip("._-")[:80] or "jogador"
+    total = len(chunks)
+    files: list[discord.File] = []
+    for index, chunk in enumerate(chunks, start=1):
+        suffix = f"-parte-{index:02d}-de-{total:02d}" if total > 1 else ""
+        files.append(discord.File(io.BytesIO(chunk), filename=f"lore-{safe_username}{suffix}.txt"))
+    return files
 
 
 def _configured_text_channel(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:
@@ -156,6 +213,76 @@ class ConfigHomeView(AdminView):
     @discord.ui.button(label="Config WL", emoji="🧟", style=discord.ButtonStyle.success)
     async def whitelist(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
         await interaction.response.edit_message(embed=wl_embed(self.bot.store.get_settings(self.guild_id)), view=WhitelistConfigView(self.bot, self.guild_id))
+
+    @discord.ui.button(label="Kick automático por voz", style=discord.ButtonStyle.danger)
+    async def kick_automatico(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        view = KickAutoConfigView(self.bot, self.guild_id)
+        await interaction.response.edit_message(embed=view.embed(), view=view)
+
+
+class KickAutoConfigView(AdminView):
+    def __init__(self, bot: "ManguaduBot", guild_id: int):
+        super().__init__(bot, guild_id)
+        channel_select = discord.ui.ChannelSelect(
+            placeholder="Call de voz obrigatória",
+            channel_types=[discord.ChannelType.voice],
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        channel_select.callback = self.select_voice_channel
+        self.add_item(channel_select)
+
+    def embed(self) -> discord.Embed:
+        config = self.bot.store.get_settings(self.guild_id)
+        kick_config = config["kick_automatico"]
+        channel_id = kick_config.get("voice_channel_id")
+        embed = discord.Embed(
+            title="Configuração: Kick automático por voz",
+            description=(
+                f"Fiscalização: **{'ATIVA' if kick_config['enabled'] else 'pausada'}**\n"
+                f"Call obrigatória: {_channel_display(channel_id)}\n\n"
+                f"Servidor PZ (definido em Config WL): `{config['wl']['server_id']}`\n\n"
+                "A cada 10 segundos, o bot consulta `/players` via RCON e compara os usuários PZ com os vínculos PZ/Discord. "
+                "Quem ficar fora da call escolhida por 60 segundos recebe kick com o nome da call no motivo.\n\n"
+                "Vincule cada jogador antes de ativar usando `/painel jogadores vincular`. Jogadores sem vínculo também contam como fora da call. "
+                "Se RCON, a lista de jogadores ou o canal de voz não puderem ser verificados, o bot não aplica kicks naquele ciclo."
+            ),
+            color=0xD84A4A if kick_config["enabled"] else 0x7F8C8D,
+        )
+        return embed
+
+    async def select_voice_channel(self, interaction: discord.Interaction) -> None:
+        config = self.bot.store.get_settings(self.guild_id)["kick_automatico"]
+        if config["enabled"]:
+            await interaction.response.send_message("Pause a fiscalização antes de trocar a call obrigatória.", ephemeral=True)
+            return
+        channel = interaction.data["values"][0]
+        channel_id = int(channel)
+        self.bot.store.set_value(self.guild_id, "kick_automatico", "voice_channel_id", channel_id)
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="Ativar / pausar fiscalização", style=discord.ButtonStyle.danger, row=1)
+    async def toggle(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        config = self.bot.store.get_settings(self.guild_id)["kick_automatico"]
+        if config["enabled"]:
+            self.bot.store.set_value(self.guild_id, "kick_automatico", "enabled", False)
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+            return
+
+        await interaction.response.defer()
+        ready, message = await self.bot._validate_kick_auto_setup(interaction.guild)
+        if not ready:
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        self.bot.store.set_value(self.guild_id, "kick_automatico", "enabled", True)
+        await interaction.edit_original_response(embed=self.embed(), view=self)
+        if message:
+            await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="Voltar", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(embed=_home_embed(self.bot.store.get_settings(self.guild_id)), view=ConfigHomeView(self.bot, self.guild_id))
 
 
 class ChannelsView(AdminView):
@@ -275,6 +402,9 @@ class WhitelistConfigView(AdminView):
         self.add_item(server_select)
 
     async def select_server(self, interaction: discord.Interaction) -> None:
+        if self.bot.store.get_settings(self.guild_id)["kick_automatico"]["enabled"]:
+            await interaction.response.send_message("Pause a fiscalização por voz antes de trocar o servidor PZ selecionado.", ephemeral=True)
+            return
         server_id = str(interaction.data["values"][0])
         if self.bot.registry.get_server(server_id) is None:
             await interaction.response.send_message("Servidor não encontrado.", ephemeral=True)
@@ -598,7 +728,7 @@ class RejectReasonModal(discord.ui.Modal, title="Motivo da reprovação"):
 
 class ManguaduBot(discord.Client):
     def __init__(self, store: ConfigStore | None = None):
-        super().__init__(intents=discord.Intents(guilds=True))
+        super().__init__(intents=discord.Intents(guilds=True, voice_states=True))
         self.store = store or ConfigStore()
         self.registry = ServerRegistry()
         self.pz_data = PzData(os.getenv("CSV_BASE_PATH"))
@@ -615,6 +745,10 @@ class ManguaduBot(discord.Client):
         self._panel_refresh_task: asyncio.Task | None = None
         self._online_since: dict[str, float] = {}
         self._automation_task: asyncio.Task | None = None
+        self._kick_auto_task: asyncio.Task | None = None
+        self._kick_auto_missing_since: dict[tuple[int, str], float] = {}
+        self._kick_auto_last_attempt: dict[tuple[int, str], float] = {}
+        self._kick_auto_last_warning: dict[int, float] = {}
         self._anticheat_task: asyncio.Task | None = None
         self._watcher_task: asyncio.Task | None = None
 
@@ -634,6 +768,15 @@ class ManguaduBot(discord.Client):
             if not await _admin_guard(interaction, self.store):
                 return
             view = GeminiConfigView(self, interaction.guild.id)
+            await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+
+        @self.tree.command(name="config_kick_automatico", description="Configura a presença obrigatória na call de voz do RP")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def config_kick_automatico(interaction: discord.Interaction) -> None:
+            if not await _admin_guard(interaction, self.store):
+                return
+            view = KickAutoConfigView(self, interaction.guild.id)
             await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
         @self.tree.command(name="config_lore", description="Importa lore base em arquivo .txt (ate 9.999.999 caracteres)")
@@ -696,6 +839,54 @@ class ManguaduBot(discord.Client):
                 view=LoreUploadDraftView(self, ticket, content),
                 ephemeral=True,
             )
+
+        @wl_group.command(name="puxar_lore", description="Baixa a lore mais recente enviada por um jogador PZ")
+        @app_commands.describe(jogador="Nome exato do usuário PZ informado na WL")
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.guild_only()
+        async def wl_pull_lore(interaction: discord.Interaction, jogador: str) -> None:
+            if not await _admin_guard(interaction, self.store):
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            request = await asyncio.to_thread(
+                self.store.get_latest_request_by_username,
+                interaction.guild.id,
+                jogador,
+            )
+            if not request:
+                await interaction.followup.send(f"Não encontrei uma WL para o usuário PZ `{discord.utils.escape_markdown(jogador)}` neste servidor.", ephemeral=True)
+                return
+            lore = request.get("lore", "")
+            if not lore:
+                await interaction.followup.send("Esse pedido não contém uma lore para baixar.", ephemeral=True)
+                return
+            try:
+                files = await asyncio.to_thread(_make_lore_files, lore, request["username"], interaction.guild.filesize_limit)
+            except ValueError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            status = clean_text(request.get("status", "desconhecido"))
+            message = (
+                f"Lore mais recente de `{discord.utils.escape_markdown(request['username'])}` "
+                f"(pedido: **{discord.utils.escape_markdown(status)}**)."
+            )
+            try:
+                for index, file in enumerate(files, start=1):
+                    content = message if index == 1 else f"Continuação da lore: parte {index} de {len(files)}."
+                    await interaction.followup.send(
+                        content=content,
+                        file=file,
+                        ephemeral=True,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            except discord.HTTPException:
+                for file in files:
+                    file.close()
+                logger.exception("Falha ao entregar a lore de %s pela interacao WL", request["username"])
+                await interaction.followup.send(
+                    "O Discord recusou o anexo. Confira o limite de upload deste servidor e tente novamente.",
+                    ephemeral=True,
+                )
 
         self.tree.add_command(wl_group)
 
@@ -1726,6 +1917,146 @@ class ManguaduBot(discord.Client):
                 logger.exception("Falha na execucao periodica das automacoes")
             await asyncio.sleep(30)
 
+    async def _validate_kick_auto_setup(self, guild: discord.Guild | None) -> tuple[bool, str]:
+        if guild is None:
+            return False, "Este comando so funciona dentro de um servidor Discord."
+        settings = self.store.get_settings(guild.id)
+        voice_channel = guild.get_channel(settings["kick_automatico"].get("voice_channel_id"))
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            return False, "Selecione uma call de voz existente antes de ativar a fiscalização."
+
+        server = self.registry.get_server(settings["wl"].get("server_id", "default"))
+        missing = describe_missing_rcon(server)
+        if missing:
+            return False, f"RCON incompleto para o servidor selecionado: {', '.join(missing)}."
+        rcon = server["rcon"]
+        result = await send_rcon_command(rcon["host"], int(rcon["port"]), rcon["password"], "players")
+        if not result.ok:
+            return False, f"Nao foi possivel validar o RCON: {result.error}"
+        names = _parse_players_snapshot(result.output)
+        if names is None:
+            return False, "A resposta de `/players` nao trouxe uma lista completa e reconhecivel; a fiscalização nao foi ativada."
+
+        links = await asyncio.to_thread(load_player_links)
+        if names and not links:
+            return False, "O arquivo de vínculos PZ/Discord está vazio ou indisponível; a fiscalização não foi ativada."
+        links_by_name = {name.casefold(): user_id for name, user_id in links.items()}
+        unlinked = [name for name in names if not links_by_name.get(name.casefold(), "").isdigit()]
+        if unlinked:
+            sample = ", ".join(f"`{discord.utils.escape_markdown(name)}`" for name in unlinked[:12])
+            remainder = f" e mais {len(unlinked) - 12}" if len(unlinked) > 12 else ""
+            return False, f"Vincule os jogadores online antes de ativar usando `/painel jogadores vincular`: {sample}{remainder}."
+        return True, "RCON e lista de jogadores validados. Jogadores novos também precisam estar vinculados antes de entrar no servidor."
+
+    def _clear_kick_auto_state(self, guild_id: int) -> None:
+        for state in (self._kick_auto_missing_since, self._kick_auto_last_attempt):
+            for key in [key for key in state if key[0] == guild_id]:
+                state.pop(key, None)
+
+    def _kick_auto_log_warning(self, guild_id: int, message: str) -> None:
+        now = asyncio.get_running_loop().time()
+        if now - self._kick_auto_last_warning.get(guild_id, -60.0) >= 60:
+            self._kick_auto_last_warning[guild_id] = now
+            logger.warning("Kick automatico pausado na guild %s: %s", guild_id, message)
+
+    async def _scan_kick_auto_guild(self, guild: discord.Guild) -> None:
+        settings = self.store.get_settings(guild.id)
+        kick_config = settings["kick_automatico"]
+        if not kick_config["enabled"]:
+            self._clear_kick_auto_state(guild.id)
+            return
+
+        voice_channel = guild.get_channel(kick_config.get("voice_channel_id"))
+        if not isinstance(voice_channel, discord.VoiceChannel):
+            self._clear_kick_auto_state(guild.id)
+            self._kick_auto_log_warning(guild.id, "a call configurada nao existe mais ou nao e uma call de voz")
+            return
+
+        server = self.registry.get_server(settings["wl"].get("server_id", "default"))
+        missing = describe_missing_rcon(server)
+        if missing:
+            self._clear_kick_auto_state(guild.id)
+            self._kick_auto_log_warning(guild.id, f"RCON incompleto: {', '.join(missing)}")
+            return
+
+        rcon = server["rcon"]
+        response = await send_rcon_command(rcon["host"], int(rcon["port"]), rcon["password"], "players")
+        if not response.ok:
+            self._clear_kick_auto_state(guild.id)
+            self._kick_auto_log_warning(guild.id, response.error)
+            return
+        names = _parse_players_snapshot(response.output)
+        if names is None:
+            self._clear_kick_auto_state(guild.id)
+            self._kick_auto_log_warning(guild.id, "a resposta de `/players` nao e uma lista completa reconhecivel")
+            return
+
+        links = await asyncio.to_thread(load_player_links)
+        if names and not links:
+            self._clear_kick_auto_state(guild.id)
+            self._kick_auto_log_warning(guild.id, "o arquivo de vinculos PZ/Discord esta vazio ou indisponivel")
+            return
+        links_by_name = {name.casefold(): user_id for name, user_id in links.items()}
+        voice_member_ids = set(voice_channel.voice_states)
+        now = asyncio.get_running_loop().time()
+        present_names = {name.casefold() for name in names}
+        for key in [key for key in self._kick_auto_missing_since if key[0] == guild.id and key[1] not in present_names]:
+            self._kick_auto_missing_since.pop(key, None)
+            self._kick_auto_last_attempt.pop(key, None)
+
+        for name in names:
+            player_key = (guild.id, name.casefold())
+            linked_user_id = links_by_name.get(name.casefold(), "")
+            in_required_call = linked_user_id.isdigit() and int(linked_user_id) in voice_member_ids
+            if in_required_call:
+                self._kick_auto_missing_since.pop(player_key, None)
+                self._kick_auto_last_attempt.pop(player_key, None)
+                continue
+
+            missing_since = self._kick_auto_missing_since.setdefault(player_key, now)
+            if now - missing_since < 60:
+                continue
+            if now - self._kick_auto_last_attempt.get(player_key, -60.0) < 60:
+                continue
+
+            # Recheck live voice state immediately before the destructive action.
+            linked_user_id = links_by_name.get(name.casefold(), "")
+            if linked_user_id.isdigit() and int(linked_user_id) in set(voice_channel.voice_states):
+                self._kick_auto_missing_since.pop(player_key, None)
+                self._kick_auto_last_attempt.pop(player_key, None)
+                continue
+
+            self._kick_auto_last_attempt[player_key] = now
+            call_name = clean_text(voice_channel.name)[:80]
+            reason = f"É necessário estar na call [{call_name}] para poder permanecer no servidor."
+            command = f"kickuser {_quote_pz(name)} -r={_quote_pz(reason)}"
+            kick_result = await send_rcon_command(rcon["host"], int(rcon["port"]), rcon["password"], command)
+            if kick_result.ok:
+                logger.info("Kick automatico enviado: jogador=%s guild=%s call=%s", name, guild.id, call_name)
+                admin_channel = _configured_text_channel(guild, settings["channels"].get("admin"))
+                if admin_channel:
+                    try:
+                        await admin_channel.send(
+                            f"Kick automático enviado para `{discord.utils.escape_markdown(name)}`: ficou 60 segundos fora de <#{voice_channel.id}>. Motivo enviado pelo PZ: {reason}",
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    except discord.HTTPException:
+                        logger.warning("Nao foi possivel registrar o kick automatico no canal admin da guild %s", guild.id)
+            else:
+                self._kick_auto_log_warning(guild.id, f"falha ao expulsar {name}: {kick_result.error}")
+
+    async def _kick_auto_loop(self) -> None:
+        while not self.is_closed():
+            for guild in self.guilds:
+                try:
+                    await self._scan_kick_auto_guild(guild)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._clear_kick_auto_state(guild.id)
+                    logger.exception("Erro na fiscalizacao de voz da guild %s", guild.id)
+            await asyncio.sleep(10)
+
     async def _anticheat_loop(self) -> None:
         while not self.is_closed():
             try:
@@ -1748,6 +2079,8 @@ class ManguaduBot(discord.Client):
 
     async def close(self) -> None:
         tasks = [task for task in (self._auto_update_task, self._panel_refresh_task, self._automation_task, self._anticheat_task, self._watcher_task) if task and not task.done()]
+        if self._kick_auto_task and not self._kick_auto_task.done():
+            tasks.append(self._kick_auto_task)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -1774,6 +2107,8 @@ class ManguaduBot(discord.Client):
             self._panel_refresh_task = asyncio.create_task(self._panel_refresh_loop(), name="manguadu-panels")
         if not self._automation_task or self._automation_task.done():
             self._automation_task = asyncio.create_task(self._automation_loop(), name="manguadu-automations")
+        if not self._kick_auto_task or self._kick_auto_task.done():
+            self._kick_auto_task = asyncio.create_task(self._kick_auto_loop(), name="manguadu-kick-automatico")
         if not self._anticheat_task or self._anticheat_task.done():
             self._anticheat_task = asyncio.create_task(self._anticheat_loop(), name="manguadu-anticheat")
         if not self._watcher_task or self._watcher_task.done():
@@ -2155,10 +2490,50 @@ class ManguaduBot(discord.Client):
                 embed.add_field(name="Contradições apontadas", value="\n".join(result.contradictions)[:900], inline=False)
         embed.add_field(name="Resumo da lore enviada", value=(request["lore"][:900] + "…") if len(request["lore"]) > 900 else request["lore"] or "Não informada", inline=False)
         embed.add_field(name="Ticket", value=f"<#{request['channel_id']}>")
+        lore_files: list[discord.File] = []
+        lore = request.get("lore", "")
+        if request.get("status") == "approved" and lore:
+            try:
+                lore_files = await asyncio.to_thread(
+                    _make_lore_files,
+                    lore,
+                    request["username"],
+                    getattr(guild, "filesize_limit", MAX_LORE_UPLOAD_BYTES),
+                )
+            except ValueError as exc:
+                embed.add_field(name="Arquivo da lore", value=f"Não foi possível anexar automaticamente: {exc}", inline=False)
+        elif request.get("status") == "approved":
+            embed.add_field(name="Arquivo da lore", value="Este pedido foi aprovado sem envio de uma lore.", inline=False)
+        audit_sent = False
         try:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            if lore_files:
+                await channel.send(embed=embed, file=lore_files[0], allowed_mentions=discord.AllowedMentions.none())
+            else:
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            audit_sent = True
+            for index, file in enumerate(lore_files[1:], start=2):
+                await channel.send(
+                    content=f"Continuação da lore de `{discord.utils.escape_markdown(request['username'])}`: parte {index} de {len(lore_files)}.",
+                    file=file,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         except discord.HTTPException:
             logger.exception("Falha ao registrar auditoria de WL na guild %s", guild.id)
+            for file in lore_files:
+                file.close()
+            if lore_files:
+                note = "O Discord recusou um dos anexos da lore. Use `/wl puxar_lore` para tentar baixar o arquivo novamente."
+                if audit_sent:
+                    try:
+                        await channel.send(note, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        logger.exception("Falha ao informar erro no anexo de auditoria da WL na guild %s", guild.id)
+                else:
+                    embed.add_field(name="Arquivo da lore", value=note, inline=False)
+                    try:
+                        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                    except discord.HTTPException:
+                        logger.exception("Falha ao publicar auditoria de WL sem o arquivo na guild %s", guild.id)
 
     async def post_review(self, channel: discord.TextChannel, ticket: dict[str, Any], username: str, character: str, lore: str, result: Any) -> None:
         embed = discord.Embed(title="📋 Pedido de whitelist", color=0xE8B44B if result and not result.approved else 0x28D17C)
